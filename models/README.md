@@ -56,7 +56,7 @@ The pieces that make #12's critic work are **in the miles tree**, not the forks:
   head, zero-init).
 - `miles/backends/megatron_utils/checkpoint.py` → `_rezero_critic_value_head` (re-zero after
   policy-ckpt load + fp32 master resync).
-- `miles/utils/ppo_utils.py` → VAPO length-adaptive GAE, partial-rollout, over-sampling.
+- `miles/utils/ppo_utils.py` → length-adaptive GAE λ=k^(1/L), partial-rollout, over-sampling.
 
 If you only need to study those, you don't strictly need the forks; you need them to *run*
 the full Megatron rollout.

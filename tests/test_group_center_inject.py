@@ -1,9 +1,9 @@
 """--group-center-inject (臂#16, 组中心化注入) 的单元测试。
 
-语义: PPO(VAPO)线上, 在 actor 的 advantage 通道做组内留一中心化——终端标量
+语义: PPO 线上, 在 actor 的 advantage 通道做组内留一中心化——终端标量
 a_j = raw_reward_j − V_j (该样本最后一个 loss-mask token 的 critic value), 注入量
 P_i = −(Σ_{j∈g, j≠i} a_j)/(n_g−1), GAE 之后按 λ_i^(L_i−1−t) 衰减注入
-(λ_i = k^(1/L_i), k = vapo_lambda_k); returns 不动,
+(λ_i = k^(1/L_i), k = gae_lambda_k); returns 不动,
 critic 照学未中心化 return。
 
 覆盖:
@@ -101,7 +101,7 @@ def _gc_ctx(raws, n_g, k, masks, positions=None, stats=None):
     )
 
 
-def _run_pair(lengths, values, rewards, gc, vapo_k=0.5, gamma=1.0, lambd=0.95):
+def _run_pair(lengths, values, rewards, gc, lam_k=0.5, gamma=1.0, lambd=0.95):
     """同一批数据跑两次: 无注入基线 vs group_center 注入。"""
     kwargs = dict(
         total_lengths=[L + 7 for L in lengths],  # prompt_len=7, 注入只看 response 坐标
@@ -110,7 +110,7 @@ def _run_pair(lengths, values, rewards, gc, vapo_k=0.5, gamma=1.0, lambd=0.95):
         rewards_list=[r.clone() for r in rewards],
         gamma=gamma,
         lambd=lambd,
-        length_adaptive_lambda_k=vapo_k,
+        length_adaptive_lambda_k=lam_k,
     )
     adv0, ret0 = get_advantages_and_returns_batch(**kwargs)
     adv1, ret1 = get_advantages_and_returns_batch(**kwargs, group_center=gc)
@@ -137,8 +137,8 @@ def cp1_parallel_state(monkeypatch):
     ],
     ids=["n3", "n8"],
 )
-@pytest.mark.parametrize("vapo_k", [None, 0.5], ids=["plain_gae", "vapo_decoupled"])
-def test_loo_hand_computed(cp1_parallel_state, n_g, lengths, vapo_k):
+@pytest.mark.parametrize("lam_k", [None, 0.5], ids=["plain_gae", "length_adaptive"])
+def test_loo_hand_computed(cp1_parallel_state, n_g, lengths, lam_k):
     alpha = 0.5
     raws = [float(i % 2) for i in range(len(lengths))]  # 0/1 结果奖励
     values, rewards, masks = _make_batch(lengths, seed=42)
@@ -147,7 +147,7 @@ def test_loo_hand_computed(cp1_parallel_state, n_g, lengths, vapo_k):
     masks[0][-2:] = 0
     stats = {}
     gc = _gc_ctx(raws, n_g, alpha, masks, stats=stats)
-    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, vapo_k=vapo_k)
+    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, lam_k=lam_k)
 
     P = _reference_P(raws, values, lengths, masks, n_g)
     for i, L in enumerate(lengths):
@@ -186,7 +186,7 @@ def test_ng1_guard_noop(cp1_parallel_state):
 
 def test_injection_equals_terminal_reward_shift_rerun_gae(cp1_parallel_state):
     """GAE 对 reward 线性, γ=1 时终端脉冲 δ 对 advantage_t 的贡献是 δ·λ_i^(L−1−t)——
-    与注入衰减 (k=vapo_lambda_k, λ_i=k^(1/L_i)) 同一公式。故注入 P_i 必须精确等价于把终端
+    与注入衰减 (k=gae_lambda_k, λ_i=k^(1/L_i)) 同一公式。故注入 P_i 必须精确等价于把终端
     reward 加 P_i (即减去留一均值 μ_i) 后重跑 GAE 的 advantage; 而 returns 若走重跑
     路径会被改动——这正是选择解析注入而非改 reward 的原因。"""
     n_g, alpha = 3, 0.5
@@ -194,7 +194,7 @@ def test_injection_equals_terminal_reward_shift_rerun_gae(cp1_parallel_state):
     raws = [1.0, 0.0, 0.0, 1.0, 1.0, 0.0]
     values, rewards, masks = _make_batch(lengths, seed=7)
     gc = _gc_ctx(raws, n_g, alpha, masks)
-    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, vapo_k=alpha)
+    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, lam_k=alpha)
 
     P = _reference_P(raws, values, lengths, masks, n_g)
     rewards_ref = [r.clone() for r in rewards]
@@ -233,7 +233,7 @@ def test_bf16_long_length_fp32_intermediates(cp1_parallel_state):
     raws = [1.0, 0.0]
     values, rewards, masks = _make_batch(lengths, dtype=torch.bfloat16, zero_base=True)
     gc = _gc_ctx(raws, n_g, alpha, masks)
-    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, vapo_k=alpha)
+    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, lam_k=alpha)
 
     # a = raw − V[last] = raw (V≡0) → P_0 = −a_1 = 0, P_1 = −a_0 = −1
     assert adv1[0].dtype == torch.bfloat16

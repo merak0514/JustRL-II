@@ -983,25 +983,6 @@ class RolloutManager:
         if hasattr(self, "_dynamic_global_batch_size"):
             train_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
 
-        if getattr(self.args, "positive_lm_loss_coef", 0) > 0:
-            from miles.utils.ppo_utils import compute_positive_lm_weights
-
-            weights = compute_positive_lm_weights(
-                train_data["raw_reward"],
-                self.args.n_samples_per_prompt,
-                self.args.positive_lm_difficulty_weight,
-            )
-            if weights is None:
-                # 组不完整或奖励非 0/1 时置零回退: 宁可本批不吃 NLL, 不允许错位组静默放大自模仿
-                logger.warning(
-                    "positive_lm_weight fallback to zeros: %d samples not divisible by "
-                    "n_samples_per_prompt=%d or non-binary raw rewards",
-                    len(train_data["raw_reward"]),
-                    self.args.n_samples_per_prompt,
-                )
-                weights = [0.0] * len(train_data["raw_reward"])
-            train_data["positive_lm_weight"] = weights
-
         return train_data
 
     def set_train_parallel_config(self, config: dict):
@@ -1034,7 +1015,6 @@ class RolloutManager:
                 "response_lengths",
                 "rewards",
                 "critic_rewards",
-                "positive_lm_weight",
                 "truncated",
                 "loss_masks",
                 "round_number",

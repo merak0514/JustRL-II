@@ -306,21 +306,14 @@ PPO_ARGS=(
   --critic-lr-warmup-iters ${CRITIC_LR_WARMUP_ITERS:-10}
 )
 
-# JustRL2 length-adaptive 解耦 GAE: VAPO_LAMBDA_K 给出首 token 拿到的终端 credit 比例 k,
-# 逐样本 λ_i = k^(1/L_i) (#12 实跑的旧 VAPO 形式 1−1/(α·L), α=1.5 等价于 k=e^(−1/1.5)≈0.513)。
-# POSITIVE_LM_LOSS_COEF 开正例 LM loss (可选)。
-if [ -n "${VAPO_LAMBDA_K:-}" ]; then
-  PPO_ARGS+=(--vapo-lambda-k ${VAPO_LAMBDA_K})
+# JustRL2 长度自适应解耦 GAE: GAE_LAMBDA_K 给出首 token 拿到的终端 credit 比例 k,
+# 逐样本 λ_i = k^(1/L_i) (#12 实跑的旧形式 1−1/(α·L), α=1.5 等价于 k=e^(−1/1.5)≈0.513)。
+if [ -n "${GAE_LAMBDA_K:-}" ]; then
+  PPO_ARGS+=(--gae-lambda-k ${GAE_LAMBDA_K})
 fi
 # JustRL2 critic value-head bias 初始化 (weight 零初始化, 故 step-0 的 V ≡ bias): 设为期望
 # 平均奖励, 省掉 critic 头 ~25 步学 offset 的过渡期。加载底模后 checkpoint.py 会重新填回。
 PPO_ARGS+=(--critic-value-bias-init ${CRITIC_VALUE_BIAS_INIT:-0.52})
-if [ -n "${POSITIVE_LM_LOSS_COEF:-}" ]; then
-  PPO_ARGS+=(--positive-lm-loss-coef ${POSITIVE_LM_LOSS_COEF})
-  if [ "${POSITIVE_LM_DIFFICULTY_WEIGHT:-1}" != "1" ]; then
-    PPO_ARGS+=(--no-positive-lm-difficulty-weight)
-  fi
-fi
 
 PPO_ARGS+=(
   --use-tis
@@ -356,14 +349,14 @@ fi
 
 # 臂#16: 组中心化注入 — actor 的 advantage 通道做组内留一中心化: 终端标量 a_j = raw_reward_j − V_j
 # (最后一个 loss-mask token 的 critic value), P_i = −(组内其余成员 a_j 之和)/(n−1), GAE 之后按
-# λ_i 衰减注入 (k 复用 VAPO_LAMBDA_K, 参数校验要求其非空); critic 照学未中心化
+# λ_i 衰减注入 (k 复用 GAE_LAMBDA_K, 参数校验要求其非空); critic 照学未中心化
 # return。a_j 用 raw_reward (纯任务奖励), 与 OLP_ANALYTIC_INJECT 可共存 (两个线性注入相加)。默认关。
 if [ "${GROUP_CENTER_INJECT:-0}" = "1" ]; then
   PPO_ARGS+=(--group-center-inject)
 fi
 
 # Kimi k1.5 组内相对长度奖励 (仅正确分支, 与 GRPO 脚本同款; 作用在 shaped reward)。
-# 默认 0 关闭——不设 LENGTH_REWARD_WEIGHT 时对 VAPO 臂严格 no-op。
+# 默认 0 关闭——不设 LENGTH_REWARD_WEIGHT 时严格 no-op。
 if [ "${LENGTH_REWARD_WEIGHT:-0}" != "0" ]; then
   PPO_ARGS+=(
     --length-reward-weight ${LENGTH_REWARD_WEIGHT}

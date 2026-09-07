@@ -14,7 +14,7 @@ the same values.
 | `SGLANG_MEM_FRACTION` | `0.83` | sglang engine memory fraction (`--sglang-mem-fraction-static`). |
 | `DYNAMIC_SAMPLING` | `1` | DAPO-style filter: drop zero-variance groups; needs over-sampling to refill. |
 | `ROLLOUT_BATCH_SIZE` | `60` | Prompts per rollout batch (→ GBS = 60 × 8 = 480). |
-| `VAPO_LAMBDA_K` | `0.513` | **Key.** Length-adaptive GAE: per-sample `λ_i = k^(1/L_i)` (first token always gets fraction k of terminal credit), returns use λ=1 (suffix reward sum). #12 literally ran the old form `1 − 1/(α·L)` with α=1.5, which is `k = e^(−1/1.5) ≈ 0.513` to < 1e-6. |
+| `GAE_LAMBDA_K` | `0.513` | **Key.** Length-adaptive GAE: per-sample `λ_i = k^(1/L_i)` (first token always gets fraction k of terminal credit), returns use λ=1 (suffix reward sum). #12 literally ran the old form `1 − 1/(α·L)` with α=1.5, which is `k = e^(−1/1.5) ≈ 0.513` to < 1e-6. |
 | `CRITIC_VALUE_BIAS_INIT` | `0.52` | JustRL2 refinement (#12 ran 0): value-head bias seeded at the expected mean reward so `V ≡ 0.52` at step 0; re-applied after the base-ckpt load. Pass `0` to reproduce #12 literally. |
 | `NUM_CRITIC_ONLY_STEPS` | `30` | First 30 rollouts train **only** the critic; actor frozen so the zero-initialized value head converges before policy updates. |
 | `ENABLE_PARTIAL_ROLLOUT` | `1` | Partial rollout: cap the longest trajectories (long-context + memory-bound). |
@@ -46,7 +46,7 @@ export CRITIC_EXCLUDE_OLP=1
 export SGLANG_MEM_FRACTION=0.83
 export DYNAMIC_SAMPLING=1
 export ROLLOUT_BATCH_SIZE=60
-export VAPO_LAMBDA_K=0.513
+export GAE_LAMBDA_K=0.513
 export CRITIC_VALUE_BIAS_INIT=0.52
 export NUM_CRITIC_ONLY_STEPS=30
 export ENABLE_PARTIAL_ROLLOUT=1

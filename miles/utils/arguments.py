@@ -930,14 +930,14 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
             parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
             parser.add_argument(
-                "--vapo-lambda-k",
+                "--gae-lambda-k",
                 type=float,
                 default=None,
                 help="JustRL2 length-adaptive decoupled GAE: advantages use per-sample "
                 "lambda_i = k ** (1 / L_i) with L_i the response length, so the first token "
                 "always receives fraction k of the terminal credit (lambda_i ** L_i == k) "
                 "regardless of length; returns use lambda = 1 (unbiased critic target). "
-                "Requires gamma == 1. None disables. (The older VAPO form 1 - 1/(alpha*L) is "
+                "Requires gamma == 1. None disables. (The older 1 - 1/(alpha*L) form is "
                 "the first-order expansion of this with k = exp(-1/alpha); alpha=1.5 ~ k=0.513.)",
             )
             parser.add_argument(
@@ -949,23 +949,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "so the critic does not spend its first ~25 steps learning the offset. Applied "
                 "both at construction and re-applied after a policy/base checkpoint load "
                 "(see checkpoint._rezero_critic_value_head). 0 restores the old zero init.",
-            )
-            parser.add_argument(
-                "--positive-lm-loss-coef",
-                type=float,
-                default=0.0,
-                help="VAPO positive-example LM loss: add coef * NLL on tokens of "
-                "samples with returns > 0.5 (correct answers). 0 disables.",
-            )
-            parser.add_argument(
-                "--no-positive-lm-difficulty-weight",
-                action="store_false",
-                dest="positive_lm_difficulty_weight",
-                default=True,
-                help="Disable weighting positive-example LM loss NLL by "
-                "(1 - group_pass_rate). Enabled by default: all-solved groups get 0, "
-                "rare successes on hard prompts get the highest weight. "
-                "Requires binary 0/1 raw rewards.",
             )
             parser.add_argument(
                 "--eps-clip-c",
@@ -1100,7 +1083,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help=(
-                    "PPO/VAPO only: regress the critic's value loss against returns computed from "
+                    "PPO only: regress the critic's value loss against returns computed from "
                     "rewards WITHOUT the soft overlong punishment (other reward shaping, e.g. the "
                     "length reward, is kept). The actor's advantages/returns still use the fully "
                     "shaped reward, with the same critic providing the baseline V."
@@ -1111,7 +1094,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help=(
-                    "PPO/VAPO only: regress the critic's value loss against returns computed from "
+                    "PPO only: regress the critic's value loss against returns computed from "
                     "rewards WITHOUT the in-group relative length reward (see "
                     "--length-reward-weight). Independent of --critic-exclude-overlong-penalty; "
                     "with both set, the critic target is the raw task reward. The actor's "
@@ -1124,7 +1107,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help=(
-                    "cleancritic 2.0 (PPO/VAPO only): take the DAPO soft overlong punishment out of "
+                    "cleancritic 2.0 (PPO only): take the DAPO soft overlong punishment out of "
                     "the learning channel entirely — rewards, GAE and the critic's regression "
                     "target all stay clean, as if OLP were off — and instead inject it analytically "
                     "into the advantages after GAE: token t of sample i gets "
@@ -1139,7 +1122,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=0.1,
                 help=(
                     "Decay radius alpha for --olp-analytic-inject, parametrized like "
-                    "the old VAPO alpha form: lambda = clamp(1 - 1/(alpha*L), min=0) with L the "
+                    "its own alpha form: lambda = clamp(1 - 1/(alpha*L), min=0) with L the "
                     "response length, so a token at distance d from the end gets weight lambda^d. "
                     "With 0.1 only roughly the last tenth of the response feels the penalty."
                 ),
@@ -1149,13 +1132,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help=(
-                    "Arm #16 (PPO/VAPO only): leave-one-out group centering injected into the "
+                    "Arm #16 (PPO only): leave-one-out group centering injected into the "
                     "actor's advantages after GAE. For each group g (the n_samples_per_prompt "
                     "samples of one prompt) compute the terminal scalar a_j = raw_reward_j - V_j "
                     "(critic value at the sample's last loss-mask token) and inject "
                     "P_i = -sum_{j in g, j != i}(a_j)/(n_g - 1) into sample i's advantages with "
                     "the same length-adaptive decay lambda_i = k ** (1/L_i) as "
-                    "the length-adaptive decoupled GAE (k = --vapo-lambda-k, required; no separate "
+                    "the length-adaptive decoupled GAE (k = --gae-lambda-k, required; no separate "
                     "hyperparameter). Equivalent to subtracting the leave-one-out group "
                     "baseline from the terminal reward and re-running GAE — but returns are "
                     "untouched: the critic keeps learning the uncentered return. a_j uses "
@@ -2693,15 +2676,15 @@ def miles_validate_args(args):
             "--group-center-inject only makes sense with a critic (--advantage-estimator ppo): "
             "the terminal scalar a_j = raw_reward_j - V_j needs critic values."
         )
-        assert getattr(args, "vapo_lambda_k", None), (
-            "--group-center-inject requires --vapo-lambda-k: the injection decay "
+        assert getattr(args, "gae_lambda_k", None), (
+            "--group-center-inject requires --gae-lambda-k: the injection decay "
             "lambda_i = k ** (1/L_i) reuses it (no separate hyperparameter by design)."
         )
         logger.info(
             "group_center_inject: ON — leave-one-out group centering injected into the actor's "
             "advantages after GAE (a_j = raw_reward_j - V_j at the last loss-mask token, "
             "P_i = -mean of the other group members' a_j, decayed with the length-adaptive lambda, "
-            f"k={getattr(args, 'vapo_lambda_k', None)}); "
+            f"k={getattr(args, 'gae_lambda_k', None)}); "
             "returns untouched — the critic keeps learning the uncentered return."
         )
 

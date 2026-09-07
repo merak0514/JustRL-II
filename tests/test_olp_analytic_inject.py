@@ -5,7 +5,7 @@
 - P=0 样本逐字节零改动;
 - padding 区零改动;
 - 走 get_advantages_and_returns_batch 全链路 (cp_size=1): 注入差值精确等于解析项,
-  returns 完全不动 (vanilla/chunked 与 VAPO 解耦两条路径), n=1 与 n=8 两种形状。
+  returns 完全不动 (vanilla/chunked 与长度自适应解耦两条路径), n=1 与 n=8 两种形状。
 
 CP>1 的分布式一致性无法在单进程单测里构造 (需要 torch.distributed 多进程 + megatron
 风格 parallel state + zigzag 切分工具链), 见文件末尾的 skip 用例说明; 结构上注入发生在
@@ -209,7 +209,7 @@ def test_rollout_non_scalar_reward_with_inject_raises():
 # ---------------------------------------------------------------------------
 
 
-def _run_batch(lengths, penalties, alpha, vapo_k=None, seed=42):
+def _run_batch(lengths, penalties, alpha, lam_k=None, seed=42):
     torch.manual_seed(seed)
     values = [torch.randn(L) for L in lengths]
     rewards = [torch.randn(L) * 0.1 for L in lengths]
@@ -220,7 +220,7 @@ def _run_batch(lengths, penalties, alpha, vapo_k=None, seed=42):
         rewards_list=[r.clone() for r in rewards],
         gamma=1.0,
         lambd=0.95,
-        length_adaptive_lambda_k=vapo_k,
+        length_adaptive_lambda_k=lam_k,
     )
     adv0, ret0 = get_advantages_and_returns_batch(**kwargs)  # 无注入基线
     adv1, ret1 = get_advantages_and_returns_batch(
@@ -230,13 +230,13 @@ def _run_batch(lengths, penalties, alpha, vapo_k=None, seed=42):
 
 
 @pytest.mark.parametrize("lengths", [[100], [100, 3, 77, 128, 1, 64, 100, 55]], ids=["n1", "n8"])
-@pytest.mark.parametrize("vapo_k", [None, 0.5], ids=["plain_gae", "vapo_decoupled"])
+@pytest.mark.parametrize("lam_k", [None, 0.5], ids=["plain_gae", "length_adaptive"])
 def test_batch_injection_matches_analytic_and_returns_untouched(
-    cp1_parallel_state, lengths, vapo_k
+    cp1_parallel_state, lengths, lam_k
 ):
     alpha = 0.1
     penalties = [(-1.0 if i % 2 == 0 else 0.0) for i in range(len(lengths))]
-    adv0, ret0, adv1, ret1 = _run_batch(lengths, penalties, alpha, vapo_k=vapo_k)
+    adv0, ret0, adv1, ret1 = _run_batch(lengths, penalties, alpha, lam_k=lam_k)
 
     for i, L in enumerate(lengths):
         expected_delta = penalties[i] * _expected_weights(L, alpha, L)

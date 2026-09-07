@@ -39,7 +39,7 @@ takes the PPO surrogate on the resulting advantages. Three things make it work:
    pollute the weight and the load path can't reset the bias) — commit `1faf7ad4c` lineage.
 2. A **critic-only warmup** (`NUM_CRITIC_ONLY_STEPS=30`): the actor is frozen while the
    value head converges, so the first policy update sees a sensible baseline.
-3. **Length-adaptive GAE** (`VAPO_LAMBDA_K`): per-sample `λ_i = k^(1/L_i)`, so the first
+3. **Length-adaptive GAE** (`GAE_LAMBDA_K`): per-sample `λ_i = k^(1/L_i)`, so the first
    token always receives fraction `k` of the terminal credit (`λ_i^L_i = k`) regardless of
    response length; the value target stays the λ=1 suffix-reward sum.
 
@@ -65,7 +65,7 @@ miles-opensource/
 ├── docker/patch/latest/       # megatron.patch + sglang.patch (pip into the forks)
 ├── models/README.md           # submodule + weight sourcing (the gate)
 ├── examples/reproducibility/  # run-qwen2.5-0.5B-gsm8k.sh (upstream) + value-head demo
-├── tests/                     # incl. test_vapo_lambda_k.py, test_critic_value_bias_init.py
+├── tests/                     # incl. test_gae_lambda_k.py, test_critic_value_bias_init.py
 ├── requirements.txt
 ├── pyproject.toml / setup.py / LICENSE (Apache-2.0)
 ```
@@ -135,7 +135,7 @@ or just:
 
 ```bash
 export EXP_TAG=main_cc_nolm_s9 CRITIC_EXCLUDE_OLP=1 SGLANG_MEM_FRACTION=0.83 \
-       DYNAMIC_SAMPLING=1 ROLLOUT_BATCH_SIZE=60 VAPO_LAMBDA_K=0.513 CRITIC_VALUE_BIAS_INIT=0.52 \
+       DYNAMIC_SAMPLING=1 ROLLOUT_BATCH_SIZE=60 GAE_LAMBDA_K=0.513 CRITIC_VALUE_BIAS_INIT=0.52 \
        NUM_CRITIC_ONLY_STEPS=30 ENABLE_PARTIAL_ROLLOUT=1 OVER_SAMPLING_BATCH_SIZE=120 \
        EPS_CLIP_HIGH=0.28 LR=1e-6 NUM_ROLLOUT=500 EVAL_INTERVAL=1000 \
        SAVE_INTERVAL=5 HF_SAVE_INTERVAL=5
@@ -164,7 +164,7 @@ Two knobs in this package are the JustRL2 refinements, not what job 825481 liter
 | length-adaptive λ | `1 − 1/(α·L)`, α=1.5 | `k^(1/L)`, k=0.513 ≡ same λ to <1e-6 at L ≥ 1000 |
 
 To reproduce #12 *literally*, pass `CRITIC_VALUE_BIAS_INIT=0`; the λ change is numerically
-a no-op at these lengths. `--vapo-lambda-alpha` no longer exists — use `--vapo-lambda-k`
+a no-op at these lengths. the old `1 − 1/(α·L)` flag no longer exists — use `--gae-lambda-k`
 with `k = exp(−1/α)`.
 
 ## Naming
@@ -211,10 +211,10 @@ mismatch/pollution that would occur if the value head had to share (or be confus
   Verify at startup: the log line `[critic-value-head] re-zeroed [...] (bias_init=0.52, master
   params resynced)`.
 
-### 3. Length-adaptive GAE (`vapo_lambda_k`, γ=1)
+### 3. Length-adaptive GAE (`gae_lambda_k`, γ=1)
 
 `get_advantages_and_returns_batch` ([`ppo_utils.py`](miles/utils/ppo_utils.py)) uses a
-per-sample λ from `vapo_lambda_rowwise`:
+per-sample λ from `length_adaptive_lambda`:
 
 ```
 λ_i = k ^ (1 / L_i)
@@ -228,9 +228,9 @@ at the first token is `λ_i^L_i`, and this choice makes it exactly `k`: longer r
 critic target is decoupled from the advantage discount. λ is computed in fp32 — at 128k
 lengths `λ = 1 − O(1e-5)`, which bf16 rounds to exactly 1.0.
 
-Relation to the VAPO form: `1 − 1/(α·L)` is the first-order expansion of `k^(1/L)` with
+Relation to the `1 − 1/(α·L)` form (what #12 literally ran): it is the first-order expansion of `k^(1/L)` with
 `k = e^(−1/α)`; the #12 run's `α = 1.5` corresponds to `k ≈ 0.513` (the two differ by
-< 1e-6 at L ≥ 1000, see `tests/test_vapo_lambda_k.py`). The same λ also drives the optional
+< 1e-6 at L ≥ 1000, see `tests/test_gae_lambda_k.py`). The same λ also drives the optional
 `--group-center-inject` decay.
 
 ### 4. Partial rollout + over-sampling

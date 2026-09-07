@@ -525,53 +525,6 @@ def get_advantages_and_returns(
     return advantages.detach(), returns
 
 
-def compute_positive_lm_weights(
-    raw_rewards: list,
-    n_samples_per_prompt: int,
-    difficulty_weight: bool,
-) -> "list[float] | None":
-    """VAPO 正例 LM loss 的逐样本权重(纯 Python, 无 torch 依赖).
-
-    样本按连续 n_samples_per_prompt 个一组(与 rollout 的 group-norm 同一
-    连续性假设), 组通过率 p_g = mean(raw_reward):
-
-        difficulty_weight=True:  w_i = (1 - p_g)  若 raw_reward_i == 1, 否则 0
-        difficulty_weight=False: w_i = 1          若 raw_reward_i == 1, 否则 0
-
-    (1 - p_g) 对所有样本生效: 全一组自然为 0, 越难的题的成功样本权重越高,
-    避免简单题正例自模仿导致的熵崩塌。
-
-    Returns:
-        list[float] 逐样本权重; 输入非法时返回 None(样本数不整除组大小,
-        或奖励不是 0/1 标量), 由调用方决定回退策略。
-    """
-    n = len(raw_rewards)
-    if n == 0 or n_samples_per_prompt <= 0 or n % n_samples_per_prompt != 0:
-        return None
-    binary = []
-    for r in raw_rewards:
-        if isinstance(r, bool) or not isinstance(r, (int, float)):
-            return None
-        if abs(r - 1.0) < 1e-6:
-            binary.append(1.0)
-        elif abs(r) < 1e-6:
-            binary.append(0.0)
-        else:
-            # 非 0/1 奖励(连续 RM 等), 门控语义不成立
-            return None
-
-    weights = [0.0] * n
-    for g in range(n // n_samples_per_prompt):
-        lo = g * n_samples_per_prompt
-        group = binary[lo : lo + n_samples_per_prompt]
-        pass_rate = sum(group) / n_samples_per_prompt
-        w = (1.0 - pass_rate) if difficulty_weight else 1.0
-        for k, correct in enumerate(group):
-            if correct == 1.0:
-                weights[lo + k] = w
-    return weights
-
-
 def compute_overlong_penalty(args, response_length: int) -> float:
     """DAPO Soft Overlong Punishment length penalty for a single sample.
 
@@ -597,20 +550,20 @@ def compute_overlong_penalty(args, response_length: int) -> float:
     return max(penalty, -factor)
 
 
-def vapo_lambda_rowwise(k: float, response_lengths, device, dtype=torch.float32) -> torch.Tensor:
+def length_adaptive_lambda(k: float, response_lengths, device, dtype=torch.float32) -> torch.Tensor:
     """JustRL2 length-adaptive GAE λ: per-sample ``λ_i = k ** (1 / L_i)``.
 
     ``k`` is the fraction of terminal credit that reaches the first token: with γ=1 the
     GAE weight of the terminal reward at distance d is ``λ_i**d``, so the first token
     always sees ``λ_i**L_i == k`` regardless of response length. Longer responses get λ
-    closer to 1, so credit propagation does not weaken with length. (The earlier VAPO
+    closer to 1, so credit propagation does not weaken with length. (The earlier
     form ``1 − 1/(α·L)`` is the first-order expansion of this with ``k = exp(−1/α)``.)
 
     Computed in float32 regardless of ``dtype``: at 128k lengths ``k**(1/L)`` is
     ``1 − 8e-6``-ish, which bf16 rounds to exactly 1.0. ``L_i == 0`` (empty response)
     gives λ=0; that row is fully masked downstream, so the value is irrelevant.
     """
-    assert 0.0 < k <= 1.0, f"--vapo-lambda-k must be in (0, 1], got {k}"
+    assert 0.0 < k <= 1.0, f"--gae-lambda-k must be in (0, 1], got {k}"
     lengths = torch.tensor(response_lengths, device=device, dtype=torch.float32)
     lam = torch.where(lengths > 0, float(k) ** (1.0 / lengths.clamp(min=1.0)), torch.zeros_like(lengths))
     return lam.to(dtype)
@@ -625,7 +578,7 @@ def apply_olp_analytic_injection(
 ) -> torch.Tensor:
     """--olp-analytic-inject (臂#14, cleancritic 2.0) 的解析注入核心。
 
-    ``lam_rowwise`` 若给出 ([B] 逐样本 λ_i, 如 vapo_lambda_rowwise 的输出) 则直接用它做
+    ``lam_rowwise`` 若给出 ([B] 逐样本 λ_i, 如 length_adaptive_lambda 的输出) 则直接用它做
     衰减, 忽略 ``inject_alpha``; 否则按 α 参数化 λ_i = clamp(1 − 1/(α_inj·L_i), 0)。
 
     在全长坐标视图 full_advantages [B, max_len] 上, 对每个样本 i 把 OLP 惩罚
@@ -634,7 +587,7 @@ def apply_olp_analytic_injection(
         full_advantages[i, t] += P_i * λ_i^(L_i - 1 - t),  t ∈ [0, L_i)
 
     其中 λ_i = clamp(1 − 1/(α_inj·L_i), min=0) (注: 这是臂#14 自己的 α 参数化, 与
-    --vapo-lambda-k 的 k^(1/L) 不同): α_inj=0.1 即只有末尾 ~10%·L 的 token 显著感到惩罚 (终点 token
+    --gae-lambda-k 的 k^(1/L) 不同): α_inj=0.1 即只有末尾 ~10%·L 的 token 显著感到惩罚 (终点 token
     权重恒为 1, 距终点 d 每远一个 token 衰减 λ 倍); α_inj·L ≤ 1 时 λ=0, 只罚
     最后一个 token (0^0=1)。P_i=0 的样本加数恒为 0, 逐字节不变; padding 区
     (t ≥ L_i) 被 mask 成 0, 不动。全程逐元素张量运算, 无 python 循环。
@@ -715,7 +668,7 @@ def get_advantages_and_returns_batch(
               raw_rewards: list[float], 全局 flat 序完整 raw_reward 列表 (长度 N_global,
                           每个 DP rank 都持有整份);
               n_samples_per_prompt: int, 组大小 n_g;
-              k:          float, 注入衰减 k (= args.vapo_lambda_k, 与 GAE 同款 λ_i = k^(1/L_i));
+              k:          float, 注入衰减 k (= args.gae_lambda_k, 与 GAE 同款 λ_i = k^(1/L_i));
               loss_masks: list[Tensor], 本地样本全长 response 坐标 loss mask;
               dp_group:   ProcessGroup | None, 组内求和的 allreduce 组 (intra_dp);
               stats_out:  dict | None, 回填统计 {"correction": [P_i], "abs": [|P_i|]}。
@@ -766,11 +719,11 @@ def get_advantages_and_returns_batch(
         # lengths λ = 1 − O(1e-5), which bf16 rounds to exactly 1.0 (every token
         # would then see the full injected scalar). chunked_gae casts λ to the
         # rewards dtype itself, so the GAE path is unchanged from before.
-        vapo_lam32 = None
+        lam32 = None
         if length_adaptive_lambda_k:
             assert gamma == 1.0, "length-adaptive decoupled GAE requires gamma == 1.0 (returns = suffix reward sum)"
-            vapo_lam32 = vapo_lambda_rowwise(length_adaptive_lambda_k, response_lengths, device)
-            lambd_rowwise = vapo_lam32.to(dtype)
+            lam32 = length_adaptive_lambda(length_adaptive_lambda_k, response_lengths, device)
+            lambd_rowwise = lam32.to(dtype)
             full_advantages, _ = chunked_gae(
                 rewards=full_rewards,
                 values=full_values,
@@ -807,8 +760,8 @@ def get_advantages_and_returns_batch(
         # --group-center-inject (臂#16): 同样在 GAE 之后、CP slice 之前的全长坐标视图上
         # 注入 (与臂#14 是两个独立的线性加法, 天然可共存)。终端标量 a_j = raw_reward_j −
         # V_j (该样本最后一个 loss-mask token 的 critic value), 注入量为组内留一均值取负
-        # P_i = −(Σ_{j∈g, j≠i} a_j)/(n_g−1), 衰减 λ_i 与 VAPO 解耦 GAE 同款
-        # (k=vapo_lambda_k, λ_i=k^(1/L_i))——γ=1 时 GAE 对终端 reward 脉冲的传播权重恰为
+        # P_i = −(Σ_{j∈g, j≠i} a_j)/(n_g−1), 衰减 λ_i 与长度自适应解耦 GAE 同款
+        # (k=gae_lambda_k, λ_i=k^(1/L_i))——γ=1 时 GAE 对终端 reward 脉冲的传播权重恰为
         # λ_i^(L_i−1−t), 故注入在数学上等价于 "终端 reward 减去组内留一均值后重跑 GAE"
         # 的 advantage; 但 full_returns 已在此前算好且不再动, critic 照学未中心化 return。
         #
@@ -863,7 +816,7 @@ def get_advantages_and_returns_batch(
             else:
                 p_local = torch.zeros_like(a_local)  # n_g==1: 无兄弟, P=0, 严格 no-op
             p_list = [float(p) for p in p_local.tolist()]
-            gc_lam = vapo_lam32 if vapo_lam32 is not None else vapo_lambda_rowwise(
+            gc_lam = lam32 if lam32 is not None else length_adaptive_lambda(
                 group_center["k"], response_lengths, device
             )
             full_advantages = apply_olp_analytic_injection(
@@ -950,7 +903,7 @@ def chunked_gae(
                           step is assumed to be zero (standard PPO convention).
         gamma (float): discount factor.
         lambd (float | Tensor): GAE lambda; a scalar, or a [B] tensor for
-                          per-sample lambda (e.g. VAPO length-adaptive GAE).
+                          per-sample lambda (length-adaptive GAE).
         chunk_size (int): sequence chunk length for parallel scan.
 
     Returns:

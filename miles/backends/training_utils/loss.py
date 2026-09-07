@@ -814,7 +814,7 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
             rollout_data["olp_inject_mean_penalty"] = [float(p) for p in olp_inject_penalties]
         # --group-center-inject (臂#16): actor 的 advantage 通道做组内留一中心化——终端标量
         # a_j = raw_reward_j − V_j (该样本最后一个 loss-mask token 的 critic value), 注入量
-        # P_i = −(组内其余成员 a_j 之和)/(n_g−1), 在 GAE 之后按 vapo λ_i 衰减注入 (数学上
+        # P_i = −(组内其余成员 a_j 之和)/(n_g−1), 在 GAE 之后按长度自适应 λ_i 衰减注入 (数学上
         # 等价于终端 reward 减去组内留一基线后重跑 GAE 的 advantage); returns 不动, critic
         # 照学未中心化 return。a_j 用 raw_reward (纯任务奖励, 不含 OLP/length shaping)——
         # 与 --olp-analytic-inject 可共存 (两个线性注入对 full_advantages 相加), 对基线
@@ -843,7 +843,7 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
                 positions=positions,
                 raw_rewards=raw_full,
                 n_samples_per_prompt=args.n_samples_per_prompt,
-                k=args.vapo_lambda_k,
+                k=args.gae_lambda_k,
                 loss_masks=loss_masks,
                 dp_group=parallel_state.intra_dp.group,
                 stats_out=group_center_stats,
@@ -855,7 +855,7 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
             rewards,
             args.gamma,
             args.lambd,
-            length_adaptive_lambda_k=args.vapo_lambda_k,
+            length_adaptive_lambda_k=args.gae_lambda_k,
             olp_inject_penalties=olp_inject_penalties,
             olp_inject_alpha=getattr(args, "olp_inject_alpha", 0.1),
             group_center=group_center_ctx,
@@ -1302,40 +1302,6 @@ def policy_loss_function(
 
     loss = pg_loss - args.entropy_coef * entropy_loss
 
-    positive_lm_loss = None
-    positive_lm_weight_mean = None
-    if getattr(args, "positive_lm_loss_coef", 0) > 0:
-        # VAPO positive-example LM loss: 对答对样本 (returns ≡ R > 0.5) 的 token 加 NLL。
-        # 逐样本权重由 rollout 侧生成(difficulty_weight 开启时为 1 - group_pass_rate);
-        # 权重缺失回退 w ≡ 0(fail-safe 关闭, 防止无权重数据静默退回全量自模仿)。
-        returns_flat = torch.cat(batch["returns"], dim=0)
-        positive_tokens = active_tokens & (returns_flat > 0.5)
-        nll = torch.where(positive_tokens, -log_probs, log_probs.new_zeros(()))
-        sample_weights = batch.get("positive_lm_weight")
-        if sample_weights is not None:
-            assert len(sample_weights) == len(batch["returns"]), (
-                f"positive_lm_weight count {len(sample_weights)} != samples {len(batch['returns'])}"
-            )
-            weight_flat = torch.cat(
-                [
-                    log_probs.new_full((ret.numel(),), float(w))
-                    for w, ret in zip(sample_weights, batch["returns"], strict=True)
-                ]
-            )
-            nll = nll * weight_flat
-            # 以 _weighted/(分子,分母) 形式上报得到真实样本均值; 直接报标量会在
-            # per-token-loss 模式下被按 token 数归一化, 观测值缩小 ~3 万倍
-            positive_lm_weight_mean = torch.stack(
-                [
-                    log_probs.new_tensor(float(sum(sample_weights))),
-                    log_probs.new_tensor(float(len(sample_weights))),
-                ]
-            )
-        else:
-            nll = nll * 0.0
-        positive_lm_loss = sum_of_sample_mean(nll)
-        loss = loss + args.positive_lm_loss_coef * positive_lm_loss
-
     if args.use_kl_loss:
         ref_log_probs = batch["ref_log_probs"]
         ref_log_probs = torch.cat(ref_log_probs, dim=0)
@@ -1406,10 +1372,6 @@ def policy_loss_function(
         "pg_clipfrac": pg_clipfrac.clone().detach(),
         "ppo_kl": ppo_kl.clone().detach(),
     }
-    if positive_lm_loss is not None:
-        reported_loss["positive_lm_loss"] = positive_lm_loss.clone().detach()
-    if positive_lm_weight_mean is not None:
-        reported_loss["_weighted/positive_lm_weight_mean"] = positive_lm_weight_mean.clone().detach()
     if ess_ratio_weight is None:
         reported_loss["ess_ratio"] = ess_ratio_sum.squeeze()
     else:
