@@ -25,25 +25,15 @@ bash justrl2/setup/setup.sh
 set -x
 
 # ---- sanity: model / data must exist (a wrong --ref-load silently random-inits) ----
-for d in "$HF_MODEL_DIR" "$MEGATRON_MODEL_PATH"; do
-  [ -e "$d" ] || { echo "FATAL: model path $d does not exist (see justrl2/prepare_model.sh)" >&2; exit 1; }
+for d in "$HF_MODEL_DIR" "$MEGATRON_MODEL_PATH" Megatron-LM sglang; do
+  [ -e "$d" ] || { echo "FATAL: $d does not exist (models: justrl2/prepare_model.sh; frameworks: third_party/README.md)" >&2; exit 1; }
 done
 for f in $TRAIN_FILE; do
   [ -f "$f" ] || { echo "FATAL: train file $f does not exist (see justrl2/prepare_data.py)" >&2; exit 1; }
 done
 
-# MiniCPM-2B ships its modeling code with the HF checkpoint (trust_remote_code); make it
-# importable for every Ray worker.
-HF_MODULES_DIR=${HF_MODULES_DIR:-/root/.cache/huggingface/modules}
-HF_DYNAMIC_MODULE_DIR="${HF_MODULES_DIR}/transformers_modules/$(basename "$HF_MODEL_DIR" | sed 's/\./_dot_/g; s/-/_/g')"
-mkdir -p "$HF_DYNAMIC_MODULE_DIR"
-touch "${HF_MODULES_DIR}/transformers_modules/__init__.py" "${HF_DYNAMIC_MODULE_DIR}/__init__.py"
-for py_file in configuration_minicpm.py modeling_minicpm.py; do
-  [ -f "${HF_MODEL_DIR}/${py_file}" ] && cp "${HF_MODEL_DIR}/${py_file}" "${HF_DYNAMIC_MODULE_DIR}/"
-done
-
 export SGLANG_PATH=${WORK_DIR}/sglang
-export PYTHONPATH=.:Megatron-LM:mbridge:${SGLANG_PATH}/python:${HF_MODULES_DIR}
+export PYTHONPATH=.:Megatron-LM:${SGLANG_PATH}/python
 source justrl2/model_args/minicpm-2b.sh
 
 # ---- topology: PPO needs actor and critic world sizes equal (rank-pairwise NCCL groups) ----

@@ -10,7 +10,7 @@ This reproduces the eval setting used for the paper numbers (16 samples per prob
 T=1.0, top-p 0.95, 126976-token budget) with sglang's offline engine and the same
 `math` grader miles uses in training (rule-based + math-verify fallback). Reports
 mean accuracy over samples (acc@n), pass@n, mean response length and the truncation
-rate per file. Needs the sglang submodule on PYTHONPATH (see third_party/README.md)
+rate per file. Needs SGLang importable (the community image, see third_party/README.md)
 and one GPU (or more with --tp).
 """
 

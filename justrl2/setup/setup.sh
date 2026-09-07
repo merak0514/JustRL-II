@@ -30,21 +30,18 @@ else
   echo "[setup.sh] SKIP_PIP_INSTALL=1, skipping all pip installs."
 fi
 
-# Apply the miles patch set to the Megatron-LM submodule. The patch is what wires
-# miles' scalar value-head critic and MiniCPM support into the Megatron rollout —
-# it MUST be applied or the critic's output_layer/LM-head handling breaks. The
-# marker file makes the patch idempotent (re-running setup.sh is a no-op).
-cd Megatron-LM
-OLD_MARKER=".miles_megatron_patch_v0.5.7_applied"
-PATCH_MARKER=".miles_megatron_patch_latest_applied"
-if [ -f "${OLD_MARKER}" ] && [ ! -f "${PATCH_MARKER}" ]; then
-  mv "${OLD_MARKER}" "${PATCH_MARKER}"
-  echo "migrated patch marker: ${OLD_MARKER} -> ${PATCH_MARKER}"
-fi
-if [ -f "${PATCH_MARKER}" ]; then
-  echo "skip megatron.patch (marker exists: ${PATCH_MARKER})"
-else
-  patch -p1 -N --batch < "$WORK_DIR/third_party/patches/megatron.patch" || true
-  touch "${PATCH_MARKER}"
-  echo "applied megatron.patch (created marker: ${PATCH_MARKER})"
+# Megatron patch. The community image (radixark/miles, Megatron-LM = radixark/Megatron-LM
+# @ miles-main) already contains these changes; only apply when you build on stock
+# NVIDIA Megatron-LM:   APPLY_MEGATRON_PATCH=1 bash justrl2/setup/setup.sh
+if [ "${APPLY_MEGATRON_PATCH:-0}" = "1" ]; then
+  cd Megatron-LM
+  PATCH_MARKER=".miles_megatron_patch_applied"
+  if [ -f "${PATCH_MARKER}" ]; then
+    echo "skip megatron.patch (marker exists: ${PATCH_MARKER})"
+  else
+    patch -p1 -N --batch < "$WORK_DIR/third_party/patches/megatron.patch"
+    touch "${PATCH_MARKER}"
+    echo "applied megatron.patch (created marker: ${PATCH_MARKER})"
+  fi
+  cd "$WORK_DIR"
 fi

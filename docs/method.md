@@ -107,6 +107,7 @@ mixture of correctness and length. The actor's advantages are unchanged.
 
 ## 7. Optional: DSpark speculative decoding
 
-Set `DSPARK_DRAFT_MODEL_PATH` to a MiniCPM-2B Draft-5L model and SGLang runs DSpark
-speculative decoding (block size 7). Requires the sglang fork commit in
-`third_party/README.md`. Off by default; when off the launcher passes nothing.
+The reference run used DSpark speculative decoding (a 5-layer draft model, block size 7)
+to speed up 128k rollouts. It needs an SGLang build with the DSpark scheduler, which the
+community image does not have; it is off by default and only affects throughput, not the
+recipe. If you have such a build, set `DSPARK_DRAFT_MODEL_PATH`.

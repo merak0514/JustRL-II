@@ -1,5 +1,20 @@
 # Reproducing the run
 
+## Environment
+
+Use the image (`Dockerfile`, built on `radixark/miles:dev`): Megatron-LM, SGLang,
+TransformerEngine, Ray and the HF→Megatron converter come preinstalled and the two
+frameworks are symlinked to `Megatron-LM/` and `sglang/` in the repo root, which is what
+`justrl2/train.sh` expects. Mount `models/`, `datasets/` and `runs/` from the host.
+Without the image, see `third_party/README.md`.
+
+Inside the container:
+
+```bash
+bash   justrl2/prepare_model.sh     # openbmb/JustRL-II-base-model -> models/ (+ torch_dist), needs 1 GPU
+python justrl2/prepare_data.py      # -> datasets/
+```
+
 ## Hardware and topology
 
 The reference run used 16 nodes × 8 H100: 8 actor nodes + 8 critic nodes, SGLang engines
@@ -66,7 +81,9 @@ Two knobs in the released config are refinements over what that run literally ex
 
 To reproduce the original literally: `CRITIC_VALUE_BIAS_INIT=0 GAE_LAMBDA_K=0.513`. Everything else
 (rollout sizes, clip, warmup, overlong penalty, `CRITIC_EXCLUDE_OLP=1`, LR, dynamic
-sampling, partial rollout, DSpark) is as run.
+sampling, partial rollout) is as run; DSpark speculative decoding, which that run used
+for rollout speed, is unavailable in the community SGLang build (see
+`third_party/README.md`) and does not change the recipe.
 
 ## Determinism
 

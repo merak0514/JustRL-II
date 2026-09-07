@@ -25,7 +25,8 @@ justrl2/                   the recipe — everything JustRL2-specific
   eval.py                  offline AIME eval of an HF export
   model_args/, setup/      MiniCPM-2B Megatron args; env / ray / setup helpers
 miles/, train.py           the framework (Miles fork; see third_party/README.md)
-third_party/               submodule pins + patches for Megatron-LM / mbridge / sglang
+third_party/               Megatron-LM / SGLang: community image, patches for stock Megatron
+Dockerfile                 FROM radixark/miles:dev (Megatron-LM + SGLang + TE preinstalled)
 tools/                     HF <-> torch_dist converters
 examples/value_head_demo.py   CPU toy: bias 0 vs 0.52 value-head init
 tests/                     GAE λ, value-head init, chunked GAE
@@ -34,9 +35,9 @@ tests/                     GAE λ, value-head init, chunked GAE
 ## Quick start
 
 ```bash
-# 0. environment: Linux, CUDA, Python >= 3.10, one H100-class node minimum
-pip install -r requirements.txt
-#    plus the three submodules (Megatron-LM, mbridge, sglang) -> third_party/README.md
+# 0. environment: the community Miles image has Megatron-LM, SGLang, TE, Ray preinstalled
+docker build -t justrl2 . && docker run --gpus all --ipc=host --network=host -it justrl2
+#    (bare-metal alternative: third_party/README.md)
 
 # 1. weights and data (Hugging Face)
 bash   justrl2/prepare_model.sh          # -> ./models
@@ -61,9 +62,9 @@ any of them can be overridden from the shell (`GAE_LAMBDA_K=0.4 bash justrl2/tra
 | `CRITIC_VALUE_BIAS_INIT` | 0.52  | value head starts at the mean reward; removes the ~25-step warmup transient                  |
 | `NUM_CRITIC_ONLY_STEPS`  | 30    | critic converges before the first policy update                                              |
 
-## Without the submodules
+## Without a GPU stack
 
-The Megatron/SGLang forks are needed to *train*. To study or unit-test the recipe itself:
+Megatron-LM and SGLang are needed to *train*. To study or unit-test the recipe itself:
 
 ```bash
 python examples/value_head_demo.py          # torch only

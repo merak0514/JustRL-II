@@ -24,7 +24,8 @@ justrl2/                   配方层 —— 所有 JustRL2 专属内容
   eval.py                  对 HF 导出权重做离线 AIME 评测
   model_args/, setup/      MiniCPM-2B 的 Megatron 参数；env / ray / 安装辅助脚本
 miles/, train.py           框架层（Miles fork；见 third_party/README.md）
-third_party/               三个子模块（Megatron-LM / mbridge / sglang）的 pin 与 patch
+third_party/               Megatron-LM / SGLang：社区镜像说明，及用于原版 Megatron 的 patch
+Dockerfile                 FROM radixark/miles:dev（预装 Megatron-LM + SGLang + TE）
 tools/                     HF <-> torch_dist 转换脚本
 examples/value_head_demo.py   CPU 玩具实验：value head bias 初始化 0 vs 0.52
 tests/                     GAE λ、value head 初始化、chunked GAE
@@ -33,9 +34,9 @@ tests/                     GAE λ、value head 初始化、chunked GAE
 ## 快速开始
 
 ```bash
-# 0. 环境：Linux、CUDA、Python >= 3.10，至少一台 H100 级别节点
-pip install -r requirements.txt
-#    另需三个子模块（Megatron-LM、mbridge、sglang）-> third_party/README.md
+# 0. 环境：社区 Miles 镜像已预装 Megatron-LM、SGLang、TE、Ray
+docker build -t justrl2 . && docker run --gpus all --ipc=host --network=host -it justrl2
+#    （不用镜像的裸机方案见 third_party/README.md）
 
 # 1. 权重与数据（Hugging Face）
 bash   justrl2/prepare_model.sh          # -> ./models
@@ -59,9 +60,9 @@ python justrl2/eval.py --model runs/justrl2_minicpm_2b_math128k/hf/iter_0000299 
 | `CRITIC_VALUE_BIAS_INIT` | 0.52 | value head 从平均奖励起步；消除约 25 步的 warmup 过渡期 |
 | `NUM_CRITIC_ONLY_STEPS` | 30 | critic 先收敛，再开始更新 policy |
 
-## 没有子模块时能做什么
+## 没有 GPU 环境时能做什么
 
-训练需要 Megatron / SGLang 的 fork。只研究或单测配方本身：
+训练需要 Megatron-LM 与 SGLang。只研究或单测配方本身：
 
 ```bash
 python examples/value_head_demo.py          # 只依赖 torch
