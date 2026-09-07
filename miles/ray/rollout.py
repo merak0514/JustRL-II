@@ -373,10 +373,6 @@ class RolloutManager:
             self.custom_convert_samples_to_train_data_func = load_function(
                 self.args.custom_convert_samples_to_train_data_path
             )
-        # --critic-exclude-length-reward: per-batch cache of the length rewards actually applied
-        # in _post_process_rewards, so _convert_samples_to_train_data can subtract the exact
-        # per-sample values instead of recomputing the group-relative reward.
-        self._last_length_rewards = None
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
@@ -773,11 +769,6 @@ class RolloutManager:
                     logger.error(f"Failed to save even simplified data: {e2}")
 
     def _post_process_rewards(self, samples: list[Sample] | list[list[Sample]]):
-        # Reset the per-batch length-reward cache; it is refilled below only when the length
-        # reward is actually applied to this batch. Used by --critic-exclude-length-reward: the
-        # length reward is computed group-relatively, so recomputing it later would have to
-        # replicate the exact group slicing — caching the applied values is exact and cheap.
-        self._last_length_rewards = None
         if self.custom_reward_post_process_func is not None:
             return self.custom_reward_post_process_func(self.args, samples)
 
@@ -786,25 +777,8 @@ class RolloutManager:
         # DAPO Soft Overlong Punishment: add a length penalty to the reward that feeds advantage
         # computation, while keeping raw_rewards as the pure task reward for logging. The penalty is
         # only applied when the reward is a plain scalar (dict/multi-key rewards are left untouched).
-        #
-        # --olp-analytic-inject (臂#14, cleancritic 2.0): OLP 完全离开 reward 通道——不加进
-        # shaped_rewards, reward/GAE/critic 回归目标全净 (等价于不开 OLP), 由训练侧在 GAE
-        # 算完后按 λ_inj^d 把 P_i 解析注入 advantage (见 ppo_utils.apply_olp_analytic_injection)。
-        # lenrw 等其他 shaping 不受影响, 叠加顺序照旧。
         shaped_rewards = raw_rewards
-        # --olp-analytic-inject + 非标量 (dict) reward 硬报错: 注入在训练侧按 response_length
-        # 无条件进行, rollout 侧无法替它"跳过"; 静默放行会让非标量 reward 的臂在不知情的
-        # 情况下吃到 OLP。臂#14 只用标量 reward, 这是故意的 loud failure。
-        # (custom_reward_post_process_path 的同用已在 arguments.py 启动校验阶段拦掉。)
-        if getattr(self.args, "olp_analytic_inject", False) and not all(
-            isinstance(r, (int, float)) for r in raw_rewards
-        ):
-            raise ValueError(
-                "--olp-analytic-inject requires scalar rewards, but this batch has non-scalar "
-                "(e.g. dict) rewards: the analytic injection happens on the training side from "
-                "response_length alone and cannot be skipped here."
-            )
-        if getattr(self.args, "overlong_buffer_len", 0) and not getattr(self.args, "olp_analytic_inject", False):
+        if getattr(self.args, "overlong_buffer_len", 0):
             if all(isinstance(r, (int, float)) for r in raw_rewards):
                 shaped_rewards = [
                     r + compute_overlong_penalty(self.args, sample.response_length)
@@ -814,24 +788,6 @@ class RolloutManager:
                 logger.warning(
                     "overlong_buffer_len is set but rewards are non-scalar; "
                     "skipping soft overlong punishment for this batch."
-                )
-
-        # Kimi k1.5-style in-group relative length reward (correct-branch only): among the correct
-        # samples of each group, the shortest gets +0.5*w and the longest -0.5*w. Applied on top of
-        # the overlong punishment; correctness is judged on the raw task reward.
-        if getattr(self.args, "length_reward_weight", 0.0):
-            if all(isinstance(r, (int, float)) for r in raw_rewards):
-                length_rewards = compute_group_length_rewards(
-                    self.args, raw_rewards, [sample.response_length for sample in samples]
-                )
-                self._last_length_rewards = length_rewards
-                shaped_rewards = [
-                    r + lr for r, lr in zip(shaped_rewards, length_rewards, strict=True)
-                ]
-            else:
-                logger.warning(
-                    "length_reward_weight is set but rewards are non-scalar; "
-                    "skipping length reward for this batch."
                 )
 
         if (
@@ -890,26 +846,6 @@ class RolloutManager:
                     "critic rewards fall back to the shaped rewards."
                 )
                 critic_rewards = list(rewards)
-
-        # --critic-exclude-length-reward: additionally remove the in-group relative length reward
-        # from the critic's regression target. Independent of the overlong switch above — the
-        # length reward is additive on the shaped reward, and the exact per-sample values applied
-        # by _post_process_rewards are cached in self._last_length_rewards (None when no length
-        # reward was applied to this batch: length_reward_weight=0, custom reward post-process,
-        # or non-scalar rewards). With both switches on, the critic target is the raw task reward.
-        if getattr(self.args, "critic_exclude_length_reward", False):
-            if critic_rewards is None:
-                critic_rewards = list(rewards)
-            if self._last_length_rewards is not None:
-                critic_rewards = [
-                    r - lr for r, lr in zip(critic_rewards, self._last_length_rewards, strict=True)
-                ]
-            else:
-                logger.warning(
-                    "critic_exclude_length_reward is set but no length reward was applied "
-                    "(custom reward post-process, non-scalar rewards, or length_reward_weight=0); "
-                    "critic rewards keep this term unchanged (nothing to remove)."
-                )
 
         train_data = {
             "tokens": [sample.tokens for sample in samples],
@@ -1481,42 +1417,6 @@ def _compute_grpo_rollout_metrics(args, samples):
     )
 
 
-def compute_group_length_rewards(args, raw_rewards: list[float], response_lengths: list[int]) -> list[float]:
-    """Kimi k1.5-style in-group relative length reward, correct-branch only.
-
-    For each contiguous group of ``n_samples_per_prompt`` samples, the correct
-    ones (raw reward > 0.5) get ``w * (0.5 - (len - min_len) / (max_len - min_len))``
-    where min/max are taken over the correct subset only, so the shortest correct
-    answer gets ``+0.5*w`` and the longest ``-0.5*w``. Incorrect samples always
-    get 0 (no early-give-up incentive). Groups with < 2 correct samples, or whose
-    correct-subset length spread is below ``length_reward_min_spread`` tokens, or
-    whose correct answers are all shorter than ``length_reward_budget_floor``
-    tokens (already compressed enough; pressure self-terminates), get all zeros.
-    See Kimi k1.5 (https://arxiv.org/abs/2501.12599) sec 2.3.3.
-    """
-    out = [0.0] * len(raw_rewards)
-    weight = float(getattr(args, "length_reward_weight", 0.0) or 0.0)
-    group_size = args.n_samples_per_prompt
-    if weight <= 0 or group_size < 2 or not raw_rewards or len(raw_rewards) % group_size != 0:
-        return out
-    min_spread = int(getattr(args, "length_reward_min_spread", 0) or 0)
-    budget_floor = int(getattr(args, "length_reward_budget_floor", 0) or 0)
-    for start in range(0, len(raw_rewards), group_size):
-        correct = [i for i in range(start, start + group_size) if raw_rewards[i] > 0.5]
-        if len(correct) < 2:
-            continue
-        lengths = [response_lengths[i] for i in correct]
-        min_len, max_len = min(lengths), max(lengths)
-        if max_len < budget_floor:
-            continue
-        spread = max_len - min_len
-        if spread <= 0 or spread < min_spread:
-            continue
-        for i in correct:
-            out[i] = weight * (0.5 - (response_lengths[i] - min_len) / spread)
-    return out
-
-
 def compute_metrics_from_samples(args, samples):
     log_dict = {}
 
@@ -1569,17 +1469,6 @@ def compute_metrics_from_samples(args, samples):
         log_dict["overlong/filtered_ratio"] = float(
             np.mean([int(s.status == Sample.Status.TRUNCATED) for s in valid_samples])
         )
-
-    if getattr(args, "length_reward_weight", 0.0):
-        rewards_for_len = [s.get_reward_value(args) for s in valid_samples]
-        if all(isinstance(r, (int, float)) for r in rewards_for_len):
-            length_rewards = compute_group_length_rewards(
-                args, rewards_for_len, [s.response_length for s in valid_samples]
-            )
-            active = [v for v in length_rewards if v != 0.0]
-            log_dict["length_reward/active_ratio"] = len(active) / len(length_rewards) if length_rewards else 0.0
-            log_dict["length_reward/mean"] = float(np.mean(length_rewards)) if length_rewards else 0.0
-            log_dict["length_reward/abs_mean_active"] = float(np.mean(np.abs(active))) if active else 0.0
 
     raw_rewards = [s.reward for s in valid_samples if s.reward is not None and not isinstance(s.reward, dict)]
     if raw_rewards:

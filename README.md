@@ -230,8 +230,7 @@ lengths `λ = 1 − O(1e-5)`, which bf16 rounds to exactly 1.0.
 
 Relation to the `1 − 1/(α·L)` form (what #12 literally ran): it is the first-order expansion of `k^(1/L)` with
 `k = e^(−1/α)`; the #12 run's `α = 1.5` corresponds to `k ≈ 0.513` (the two differ by
-< 1e-6 at L ≥ 1000, see `tests/test_gae_lambda_k.py`). The same λ also drives the optional
-`--group-center-inject` decay.
+< 1e-6 at L ≥ 1000, see `tests/test_gae_lambda_k.py`).
 
 ### 4. Partial rollout + over-sampling
 

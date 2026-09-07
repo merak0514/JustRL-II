@@ -533,10 +533,6 @@ def compute_overlong_penalty(args, response_length: int) -> float:
     length enters the buffer band ``[max_len - buffer_len, max_len]``.
     Returns 0 when soft overlong punishment is disabled (buffer_len <= 0).
     See https://arxiv.org/abs/2503.14476 .
-
-    历史上住在 miles/ray/rollout.py; 为了让训练侧 (--olp-analytic-inject, 臂#14)
-    与 rollout 侧共用同一份实现而挪到这里 (本模块无 megatron/sglang 依赖, 双方
-    都能 import, 无循环依赖)。
     """
     buffer_len = getattr(args, "overlong_buffer_len", 0) or 0
     if buffer_len <= 0:
@@ -569,71 +565,6 @@ def length_adaptive_lambda(k: float, response_lengths, device, dtype=torch.float
     return lam.to(dtype)
 
 
-def apply_olp_analytic_injection(
-    full_advantages: torch.Tensor,
-    response_lengths,
-    penalties,
-    inject_alpha: "float | None" = None,
-    lam_rowwise: "torch.Tensor | None" = None,
-) -> torch.Tensor:
-    """--olp-analytic-inject (臂#14, cleancritic 2.0) 的解析注入核心。
-
-    ``lam_rowwise`` 若给出 ([B] 逐样本 λ_i, 如 length_adaptive_lambda 的输出) 则直接用它做
-    衰减, 忽略 ``inject_alpha``; 否则按 α 参数化 λ_i = clamp(1 − 1/(α_inj·L_i), 0)。
-
-    在全长坐标视图 full_advantages [B, max_len] 上, 对每个样本 i 把 OLP 惩罚
-    P_i 以指数衰减权重注入 advantage:
-
-        full_advantages[i, t] += P_i * λ_i^(L_i - 1 - t),  t ∈ [0, L_i)
-
-    其中 λ_i = clamp(1 − 1/(α_inj·L_i), min=0) (注: 这是臂#14 自己的 α 参数化, 与
-    --gae-lambda-k 的 k^(1/L) 不同): α_inj=0.1 即只有末尾 ~10%·L 的 token 显著感到惩罚 (终点 token
-    权重恒为 1, 距终点 d 每远一个 token 衰减 λ 倍); α_inj·L ≤ 1 时 λ=0, 只罚
-    最后一个 token (0^0=1)。P_i=0 的样本加数恒为 0, 逐字节不变; padding 区
-    (t ≥ L_i) 被 mask 成 0, 不动。全程逐元素张量运算, 无 python 循环。
-
-    Args:
-        full_advantages: [B, max_len] 全长坐标 advantage (GAE 输出)。
-        response_lengths: list[int], 每个样本的完整 response 长度 (非 CP 分片长度)。
-        penalties: list[float], 每个样本的 OLP 惩罚 P_i (compute_overlong_penalty
-            的输出, 惩罚为负, 无惩罚为 0)。
-        inject_alpha: 注入衰减半径 α_inj (> 0)。
-
-    Returns:
-        注入后的 full_advantages (新张量, 不原地修改输入)。
-    """
-    B, max_len = full_advantages.shape
-    assert len(response_lengths) == B and len(penalties) == B
-    device = full_advantages.device
-    dtype = full_advantages.dtype
-
-    # 权重计算固定在 float32 进行, 与 full_advantages 的 dtype 无关: bf16 下
-    # λ = 1 − 1/(α·L) 在 128k 长度上是 1 − 7.9e-5, 会被舍入成 1.0; t_idx/lengths
-    # 这类大整数 (>256) bf16 也无法精确表示, 终点边界比较会错判 (实测 L=126976 时
-    # w_end=0、其余位置全 −1 的灾难性翻转)。算完再把注入项 .to(dtype) 回写。
-    compute_dtype = torch.float32
-    penalties_t = torch.tensor(penalties, device=device, dtype=compute_dtype)  # [B]
-    lengths_t = torch.tensor(response_lengths, device=device, dtype=compute_dtype)  # [B]
-    if lam_rowwise is not None:
-        lam = lam_rowwise.to(device=device, dtype=compute_dtype)  # [B]
-    else:
-        assert inject_alpha is not None, "apply_olp_analytic_injection needs inject_alpha or lam_rowwise"
-        # L=0 (空响应) 时 1/(α·0)=inf → 1-inf=-inf → clamp 到 0; 该行 valid mask 全 False,
-        # 注入量恒 0, 不会产生 NaN。
-        lam = torch.clamp(1.0 - 1.0 / (inject_alpha * lengths_t), min=0.0)  # [B]
-    t_idx = torch.arange(max_len, device=device, dtype=compute_dtype).unsqueeze(0)  # [1, max_len]
-    # 距终点距离 d = L_i - 1 - t; padding 区 d<0, 先 clamp 到 0 避免 0^负数=inf,
-    # 再用 valid mask 归零 (clamp 后 padding 区权重是 λ^0=1, 必须靠 mask 拦住)。
-    dist_to_end = (lengths_t - 1.0).unsqueeze(1) - t_idx  # [B, max_len]
-    valid = t_idx < lengths_t.unsqueeze(1)  # [B, max_len]
-    weights = torch.where(
-        valid,
-        lam.unsqueeze(1) ** dist_to_end.clamp(min=0.0),
-        torch.zeros((), device=device, dtype=compute_dtype),
-    )
-    return full_advantages + (penalties_t.unsqueeze(1) * weights).to(dtype)
-
-
 def get_advantages_and_returns_batch(
     total_lengths,
     response_lengths,
@@ -643,9 +574,6 @@ def get_advantages_and_returns_batch(
     lambd,
     chunked: bool = True,
     length_adaptive_lambda_k: "float | None" = None,
-    olp_inject_penalties: "list[float] | None" = None,
-    olp_inject_alpha: float = 0.1,
-    group_center: "dict | None" = None,
 ):
     """
     Batched GAE with CP support.
@@ -657,22 +585,6 @@ def get_advantages_and_returns_batch(
         length_adaptive_lambda_k: 若设置 (JustRL2 length-adaptive 解耦 GAE), advantage 用
             逐样本 λ_i = k^(1/L_i) (首 token 恒拿到终端 credit 的 k 倍, 与长度无关),
             而 returns 用 λ=1 的无偏目标 (γ=1 时即奖励后缀和), 二者解耦。
-        olp_inject_penalties: 若非 None (--olp-analytic-inject, 臂#14), 每个样本的
-            OLP 惩罚 P_i; GAE 算完后在全长坐标上按 λ_inj^d 注入 advantage,
-            returns 不动 (见 apply_olp_analytic_injection)。
-        olp_inject_alpha: 注入衰减半径 α_inj (仅在 olp_inject_penalties 非 None 时用)。
-        group_center: 若非 None (--group-center-inject, 臂#16), 组内留一中心化注入
-            的上下文 dict, 键:
-              positions:  list[int], 本地样本在全局 flat 序里的位置 (process_rollout_data
-                          保留的 DP partition, 组内 n_g 条样本在 flat 序里连续);
-              raw_rewards: list[float], 全局 flat 序完整 raw_reward 列表 (长度 N_global,
-                          每个 DP rank 都持有整份);
-              n_samples_per_prompt: int, 组大小 n_g;
-              k:          float, 注入衰减 k (= args.gae_lambda_k, 与 GAE 同款 λ_i = k^(1/L_i));
-              loss_masks: list[Tensor], 本地样本全长 response 坐标 loss mask;
-              dp_group:   ProcessGroup | None, 组内求和的 allreduce 组 (intra_dp);
-              stats_out:  dict | None, 回填统计 {"correction": [P_i], "abs": [|P_i|]}。
-            GAE 之后按 λ_i^(L_i-1-t) 把 P_i 注入 advantage, returns 不动。
     Output:
         advantages_list:   list[Tensor], each shape = [resp_len_i]
         returns_list:      list[Tensor], same shape
@@ -715,15 +627,11 @@ def get_advantages_and_returns_batch(
                 full_values[i, :L] = values_list[i][:L]
                 full_rewards[i, :L] = rewards_list[i][:L]
 
-        # fp32 copy of λ_i kept for the group-center injection below: at 128k
-        # lengths λ = 1 − O(1e-5), which bf16 rounds to exactly 1.0 (every token
-        # would then see the full injected scalar). chunked_gae casts λ to the
-        # rewards dtype itself, so the GAE path is unchanged from before.
-        lam32 = None
         if length_adaptive_lambda_k:
             assert gamma == 1.0, "length-adaptive decoupled GAE requires gamma == 1.0 (returns = suffix reward sum)"
-            lam32 = length_adaptive_lambda(length_adaptive_lambda_k, response_lengths, device)
-            lambd_rowwise = lam32.to(dtype)
+            # λ_i is computed in fp32 (at 128k lengths λ = 1 − O(1e-5), which bf16
+            # rounds to 1.0); chunked_gae casts it to the rewards dtype itself.
+            lambd_rowwise = length_adaptive_lambda(length_adaptive_lambda_k, response_lengths, device).to(dtype)
             full_advantages, _ = chunked_gae(
                 rewards=full_rewards,
                 values=full_values,
@@ -745,87 +653,6 @@ def get_advantages_and_returns_batch(
                 gamma=gamma,
                 lambd=lambd,
             )
-
-        # --olp-analytic-inject (臂#14): 在 GAE 算完之后、切回 per-sample/CP 分片之前注入。
-        # 此处 full_advantages 是全长坐标 [B, max_len]: CP>1 时各 rank 的 full_rewards/
-        # full_values 经上面的 allreduce 后完全一致, GAE 与注入都是确定性逐元素运算,
-        # 逐 rank 结果一致, 之后统一走 slice_log_prob_with_cp 切分——天然规避 zigzag
-        # 分片坐标问题。full_returns 已在注入前算好且此后不再改动: returns (critic 的
-        # 回归目标) 保持无 OLP (开关开启时 rollout 侧 reward 通道本就没加 OLP)。
-        if olp_inject_penalties is not None:
-            full_advantages = apply_olp_analytic_injection(
-                full_advantages, response_lengths, olp_inject_penalties, olp_inject_alpha
-            )
-
-        # --group-center-inject (臂#16): 同样在 GAE 之后、CP slice 之前的全长坐标视图上
-        # 注入 (与臂#14 是两个独立的线性加法, 天然可共存)。终端标量 a_j = raw_reward_j −
-        # V_j (该样本最后一个 loss-mask token 的 critic value), 注入量为组内留一均值取负
-        # P_i = −(Σ_{j∈g, j≠i} a_j)/(n_g−1), 衰减 λ_i 与长度自适应解耦 GAE 同款
-        # (k=gae_lambda_k, λ_i=k^(1/L_i))——γ=1 时 GAE 对终端 reward 脉冲的传播权重恰为
-        # λ_i^(L_i−1−t), 故注入在数学上等价于 "终端 reward 减去组内留一均值后重跑 GAE"
-        # 的 advantage; 但 full_returns 已在此前算好且不再动, critic 照学未中心化 return。
-        #
-        # 组结构与通信: 全局 flat 序里同组 n_g 条样本连续 (data_source 逐 prompt 深拷贝
-        # + sglang_rollout 按组首样本 index 排序 + chain 展平), 但 DP 切分 (balance_data
-        # 的长度均衡分区、或跨步切分) 会把组成员打散到各 rank——组内求和必须走 DP 集合
-        # 通信: 各 rank 把本地 a_j 按 flat 位置散射进稠密 [N_global] fp32 buffer, 一次
-        # all_reduce(SUM) 拼出完整 a 向量 (partition 互斥且覆盖全批, 无重叠无遗漏)。
-        #
-        # 集合通信不变量 (仿 loss.py normalize_advantages 的 DP-allreduce 注释): 开关是
-        # 全局 args 而非数据依赖, 所有 intra_dp rank 无条件走到这里恰好一次, 不会死锁;
-        # 千万不要把这段包进任何数据依赖的条件分支。CP>1 时 a_local 源于上面 CP-allreduce
-        # 后的 full_values (全长坐标、逐 CP rank 一致), loss_masks 未做 CP 切分, 故各 CP
-        # rank 的 a_local/a_buf 一致, 各自在自己的 intra_dp 组内 allreduce, 结果逐 rank
-        # 一致, 无需跨 CP 通信。单测 (无 torch.distributed 初始化) 下单进程即持有全量
-        # 数据, 跳过 allreduce 即为退化正确。
-        if group_center is not None:
-            n_g = int(group_center["n_samples_per_prompt"])
-            raw_full = group_center["raw_rewards"]
-            N_global = len(raw_full)
-            positions = group_center["positions"]
-            assert len(positions) == B, (
-                f"group_center_inject: positions ({len(positions)}) and local batch ({B}) mismatch"
-            )
-            assert N_global % n_g == 0, (
-                f"group_center_inject: global batch ({N_global}) is not whole groups of {n_g} "
-                "(trim/subsample/custom convert_samples_to_train_data broke group contiguity?)"
-            )
-            # a_j 固定 fp32 计算 (full_values 可能是 bf16; 与 apply_olp_analytic_injection
-            # 的 fp32 中间计算口径一致)。
-            a_local = torch.zeros(B, device=device, dtype=torch.float32)
-            for i in range(B):
-                L = response_lengths[i]
-                if L == 0:
-                    # 空响应 (立即 EOS): full_values 该行全 0, 取 a=0——不污染兄弟样本的
-                    # 基线, 自身注入也被 apply 的 valid mask 归零。
-                    continue
-                nz = group_center["loss_masks"][i].nonzero(as_tuple=True)[0]
-                # 全零 mask (remove_sample/env_error/overlong_filtering 置零) 无 nonzero:
-                # 回退终点 L−1。该样本自身梯度已被 mask, 但仍以真实 raw−V 贡献兄弟基线。
-                last_idx = int(nz[-1].item()) if nz.numel() > 0 else L - 1
-                a_local[i] = float(raw_full[positions[i]]) - full_values[i, last_idx].float()
-            pos_t = torch.tensor(list(positions), device=device, dtype=torch.long)
-            a_buf = torch.zeros(N_global, device=device, dtype=torch.float32)
-            a_buf[pos_t] = a_local
-            if dist.is_available() and dist.is_initialized():
-                dist.all_reduce(a_buf, group=group_center["dp_group"])
-            if n_g > 1:
-                # flat 序里组连续 → 位置 p 的组号是 p // n_g; 留一均值 = (组和 − 自身)/(n_g−1)
-                g_sum = a_buf.view(-1, n_g).sum(dim=1)  # [N_global / n_g]
-                p_local = -(g_sum[pos_t // n_g] - a_local) / (n_g - 1)
-            else:
-                p_local = torch.zeros_like(a_local)  # n_g==1: 无兄弟, P=0, 严格 no-op
-            p_list = [float(p) for p in p_local.tolist()]
-            gc_lam = lam32 if lam32 is not None else length_adaptive_lambda(
-                group_center["k"], response_lengths, device
-            )
-            full_advantages = apply_olp_analytic_injection(
-                full_advantages, response_lengths, p_list, lam_rowwise=gc_lam
-            )
-            stats_out = group_center.get("stats_out")
-            if stats_out is not None:
-                stats_out["correction"] = p_list
-                stats_out["abs"] = [abs(p) for p in p_list]
 
         advantages_list = []
         returns_list = []

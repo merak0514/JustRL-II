@@ -358,27 +358,17 @@ class MegatronTrainRayActor(TrainRayActor):
         if rollout_id >= self.args.num_critic_only_steps:
             sync_actor_critic_data(self.args, rollout_data, self._actor_critic_groups)
 
-        # --critic-exclude-overlong-penalty / --critic-exclude-length-reward: 只在 critic 进程里
-        # 把 GAE 的 reward 换成剔除对应 shaping 项后的版本 (rollout 侧已按开关组合算好
-        # critic_rewards), 使 value-loss 的回归目标 (returns) 不再学习这些 shaping 项;
-        # values/KL/γ/λ (含 gae_lambda_k 解耦路径) 与主路径完全一致。actor 进程
-        # 单独调用 compute_advantages_and_returns 且看不到这次替换, advantage 不受影响。
-        exclude_olp = getattr(self.args, "critic_exclude_overlong_penalty", False)
-        exclude_lenrw = getattr(self.args, "critic_exclude_length_reward", False)
-        if exclude_olp or exclude_lenrw:
+        # --critic-exclude-overlong-penalty: 只在 critic 进程里把 GAE 的 reward 换成剔除
+        # overlong penalty 后的版本 (rollout 侧已算好 critic_rewards), 使 value-loss 的回归
+        # 目标 (returns) 不再学习长度 shaping; values/γ/λ (含 gae_lambda_k 路径) 与主路径
+        # 完全一致。actor 进程单独调用 compute_advantages_and_returns 且看不到这次替换,
+        # advantage 不受影响。
+        if getattr(self.args, "critic_exclude_overlong_penalty", False):
             assert "critic_rewards" in rollout_data, (
-                "--critic-exclude-overlong-penalty / --critic-exclude-length-reward is set "
-                "but rollout data has no 'critic_rewards'"
+                "--critic-exclude-overlong-penalty is set but rollout data has no 'critic_rewards'"
             )
             rollout_data["rewards"] = rollout_data["critic_rewards"]
-            excluded = " + ".join(
-                name
-                for on, name in ((exclude_olp, "overlong penalty"), (exclude_lenrw, "length reward"))
-                if on
-            )
-            logger.info(
-                f"critic exclude shaping: critic returns computed from rewards without {excluded}"
-            )
+            logger.info("critic exclude shaping: critic returns computed from rewards without overlong penalty")
 
         compute_advantages_and_returns(self.args, rollout_data)
 

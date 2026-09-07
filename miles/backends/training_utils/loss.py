@@ -15,7 +15,6 @@ from miles.utils.ppo_utils import (
     compute_approx_kl,
     compute_gspo_kl,
     compute_opsm_mask,
-    compute_overlong_penalty,
     compute_policy_loss,
     get_advantages_and_returns_batch,
     get_grpo_returns,
@@ -796,58 +795,6 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
             "[adv-diag] rank=%s enter GAE B=%s max_resp=%s",
             dist.get_rank(), len(response_lengths), max(response_lengths) if response_lengths else 0,
         )
-        # --olp-analytic-inject (臂#14, cleancritic 2.0): OLP 不在 reward 里 (rollout 侧已
-        # 跳过施加), 这里按 response_length 逐样本重算 P_i——compute_overlong_penalty 是
-        # (args, L) 的确定性函数, 与 rollout 侧口径完全一致——交给 get_advantages_and_
-        # returns_batch 在 GAE 之后的全长坐标视图上注入 advantage; returns 不动。注入发生
-        # 在下方 normalize_advantages 白化之前: 注入项与 GAE advantage 一起白化, 与 OLP 走
-        # reward 通道时(基线臂)受到的处理一致, 跨臂可比。顺带把注入统计写进 rollout_data
-        # (per-sample float 列表), 由 log_rollout_data 自动以 rollout/olp_inject_penalized_ratio
-        # (P≠0 样本占比) 与 rollout/olp_inject_mean_penalty (P 均值) 上报——与旧口径
-        # rollout/overlong/penalized_ratio 同一 rollout/step 轴, 便于对齐观察。critic 进程
-        # 也会走到这里: 其 advantage 无消费方 (value loss 只用 returns), 注入是惰性无害的;
-        # 统计键在 critic 进程不会被 log_rollout_data 上报。
-        olp_inject_penalties = None
-        if getattr(args, "olp_analytic_inject", False):
-            olp_inject_penalties = [compute_overlong_penalty(args, length) for length in response_lengths]
-            rollout_data["olp_inject_penalized_ratio"] = [float(p != 0.0) for p in olp_inject_penalties]
-            rollout_data["olp_inject_mean_penalty"] = [float(p) for p in olp_inject_penalties]
-        # --group-center-inject (臂#16): actor 的 advantage 通道做组内留一中心化——终端标量
-        # a_j = raw_reward_j − V_j (该样本最后一个 loss-mask token 的 critic value), 注入量
-        # P_i = −(组内其余成员 a_j 之和)/(n_g−1), 在 GAE 之后按长度自适应 λ_i 衰减注入 (数学上
-        # 等价于终端 reward 减去组内留一基线后重跑 GAE 的 advantage); returns 不动, critic
-        # 照学未中心化 return。a_j 用 raw_reward (纯任务奖励, 不含 OLP/length shaping)——
-        # 与 --olp-analytic-inject 可共存 (两个线性注入对 full_advantages 相加), 对基线
-        # OLP-in-reward 臂语义也一致。rollout_data["raw_reward"] 不按 partition 切分, 每个
-        # rank 持有全局 flat 序完整列表; 本地样本的 flat 位置由 process_rollout_data 保留的
-        # group_center_positions 提供。组内求和的 DP allreduce 在 get_advantages_and_
-        # returns_batch 内无条件执行 (集合通信不变量见彼处注释, 仿下方 normalize_advantages
-        # 的 DP-allreduce 写法)。注入项与 GAE advantage 一起被白化, 跨臂可比。统计经
-        # log_rollout_data 以 rollout/group_center_correction (P 均值) 与 rollout/
-        # group_center_abs (|P| 均值) 上报。critic 进程照走: advantage 无消费方, 注入惰性
-        # 无害, allreduce 在 critic world 的 intra_dp 组内自我对称; 统计键不被 critic 上报。
-        group_center_ctx = None
-        group_center_stats: dict = {}
-        if getattr(args, "group_center_inject", False):
-            raw_full = rollout_data.get("raw_reward")
-            positions = rollout_data.get("group_center_positions")
-            assert raw_full is not None and positions is not None, (
-                "--group-center-inject: rollout_data is missing raw_reward/group_center_positions "
-                "(custom convert_samples_to_train_data or a debug data path that bypasses "
-                "process_rollout_data?)"
-            )
-            assert all(isinstance(r, (int, float)) for r in raw_full), (
-                "--group-center-inject requires scalar raw rewards (got non-scalar entries)"
-            )
-            group_center_ctx = dict(
-                positions=positions,
-                raw_rewards=raw_full,
-                n_samples_per_prompt=args.n_samples_per_prompt,
-                k=args.gae_lambda_k,
-                loss_masks=loss_masks,
-                dp_group=parallel_state.intra_dp.group,
-                stats_out=group_center_stats,
-            )
         advantages, returns = get_advantages_and_returns_batch(
             total_lengths,
             response_lengths,
@@ -856,13 +803,7 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
             args.gamma,
             args.lambd,
             length_adaptive_lambda_k=args.gae_lambda_k,
-            olp_inject_penalties=olp_inject_penalties,
-            olp_inject_alpha=getattr(args, "olp_inject_alpha", 0.1),
-            group_center=group_center_ctx,
         )
-        if group_center_ctx is not None:
-            rollout_data["group_center_correction"] = group_center_stats["correction"]
-            rollout_data["group_center_abs"] = group_center_stats["abs"]
         _diag_logger.info("[adv-diag] rank=%s GAE done", dist.get_rank())
 
     elif args.advantage_estimator == "reinforce_plus_plus":

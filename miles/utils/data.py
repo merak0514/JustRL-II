@@ -290,14 +290,6 @@ def process_rollout_data(args, rollout_data_ref, dp_rank, dp_size):
     partition = rollout_data.pop("partition")
     total_lengths = rollout_data["total_lengths"]
 
-    # --group-center-inject (臂#16): 组内留一中心化需要每个本地样本在全局 flat 序里的
-    # 位置——rollout_data["raw_reward"] 不按 partition 切分 (每个 DP rank 持有全局完整
-    # 列表), 本地样本靠 flat 位置去索引它、并把本地 a_j 散射进全局 buffer 做 DP allreduce。
-    # partition 在这里被 pop 丢弃, 开关开启时以 list 保留 (balance_data=False 时是 range
-    # 对象, 必须 list 化)。开关关时键不存在, 全链路零改动。
-    if getattr(args, "group_center_inject", False):
-        rollout_data["group_center_positions"] = [int(j) for j in partition]
-
     # save the seqlen of the whole rollout batch
     Timer().seq_lens = total_lengths
     rollout_data["total_lengths"] = [total_lengths[i] for i in partition]
