@@ -3,19 +3,20 @@
 # JustRL2
 
 **PPO for 128k-context math reasoning with a head-less critic, a mean-reward-seeded value
-head and a length-adaptive GAE λ — MiniCPM5-2.6B recipe, code, data and weights.**
+head and a length-adaptive GAE λ — MiniCPM-2B recipe, code, data and weights.**
 
-[中文](README-cn.md)
+[中文](README-cn.md) · [Blog post](https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic) · [博客（中文）](https://panhaoxuan.notion.site/justrl-ii-small-llms-to-128k-reasoning-with-a-critic-cn)
 
 </div>
 
-JustRL2 trains MiniCPM5-2.6B on math with a separate critic whose only output is a scalar
+JustRL2 trains MiniCPM-2B on math with a separate critic whose only output is a scalar
 value head (no LM head), initialised at the expected mean reward and re-initialised after
 the base-checkpoint load; advantages use a per-sample GAE λ = k^(1/L) so the first token of a
 100k-token solution receives the same fraction of terminal credit as the first token of a
 2k-token one. Everything else is standard PPO with DAPO-style overlong penalty, dynamic
 sampling and partial rollouts on the [Miles](https://github.com/radixark/miles) framework.
 
+- **Blog**: [JustRL-II: Scaling Small LLMs to 128k Reasoning with a Critic](https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic) — the full write-up, experiments and ablations this code implements.
 - **Method**: [`docs/method.md`](docs/method.md) — what each piece does and where it lives.
 - **Reproduce**: [`docs/reproduce.md`](docs/reproduce.md) — topology, launch, resume, eval.
 - **Data**: [`docs/data.md`](docs/data.md) — the s9 training set and AIME eval sets.
@@ -29,7 +30,7 @@ justrl2/                   the recipe — everything JustRL2-specific
   prepare_data.py          Hugging Face -> jsonl
   prepare_model.sh         Hugging Face -> HF ckpt + Megatron torch_dist ckpt
   eval.py                  offline AIME eval of an HF export
-  model_args/, setup/      MiniCPM5-2.6B Megatron args; env / ray / setup helpers
+  model_args/, setup/      MiniCPM-2B Megatron args; env / ray / setup helpers
 miles/, train.py           the framework (Miles fork; see third_party/README.md)
 third_party/               submodule pins + patches for Megatron-LM / mbridge / sglang
 tools/                     HF <-> torch_dist converters
@@ -49,14 +50,14 @@ bash   justrl2/prepare_model.sh          # -> ./models
 python justrl2/prepare_data.py           # -> ./datasets
 
 # 2. train (16 nodes x 8 GPU for the reference run; run on every node)
-bash justrl2/train.sh justrl2/configs/minicpm5-2.6b-math-128k.env
+bash justrl2/train.sh justrl2/configs/minicpm-2b-math-128k.env
 
 # 3. evaluate an export
-python justrl2/eval.py --model runs/justrl2_minicpm5_2.6b_math128k/hf/iter_0000299 \
+python justrl2/eval.py --model runs/justrl2_minicpm_2b_math128k/hf/iter_0000299 \
     --data datasets/aime-2025.jsonl --data datasets/aime-2026.jsonl --n 16
 ```
 
-All hyper-parameters are in [`justrl2/configs/minicpm5-2.6b-math-128k.env`](justrl2/configs/minicpm5-2.6b-math-128k.env);
+All hyper-parameters are in [`justrl2/configs/minicpm-2b-math-128k.env`](justrl2/configs/minicpm-2b-math-128k.env);
 any of them can be overridden from the shell (`GAE_LAMBDA_K=0.4 bash justrl2/train.sh …`).
 
 ## The three numbers that matter
@@ -74,6 +75,20 @@ The Megatron/SGLang forks are needed to *train*. To study or unit-test the recip
 ```bash
 python examples/value_head_demo.py          # torch only
 python -m pytest tests/test_gae_lambda_k.py tests/test_critic_value_bias_init.py tests/test_chunked_gae.py
+```
+
+## Citation
+
+If you use this code, data or the recipe, please cite the blog post:
+
+```bibtex
+@misc{justrl2_2026,
+  title  = {JustRL-II: Scaling Small LLMs to 128k Reasoning with a Critic},
+  author = {Pan, Haoxuan and others},
+  year   = {2026},
+  howpublished = {\url{https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic}},
+  note   = {Chinese version: \url{https://panhaoxuan.notion.site/justrl-ii-small-llms-to-128k-reasoning-with-a-critic-cn}}
+}
 ```
 
 ## License

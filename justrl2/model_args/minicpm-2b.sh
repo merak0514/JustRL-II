@@ -1,6 +1,6 @@
-# MiniCPM5-2.6B model args (Llama dense architecture)
+# MiniCPM-2B model args (Llama dense architecture)
 # Source:
-# MiniCPM5-2.6B-0426_job_327123_step_24000_fusion_think/config.json
+# MiniCPM-2B-0426_job_327123_step_24000_fusion_think/config.json
 MODEL_ARGS=(
    --swiglu
    --disable-bias-linear

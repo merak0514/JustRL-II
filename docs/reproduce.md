@@ -20,7 +20,7 @@ On every node (Ray head is `RANK=0`; `MASTER_ADDR`/`MASTER_PORT`/`WORLD_SIZE`/`R
 set by your scheduler, or left unset for a single node):
 
 ```bash
-bash justrl2/train.sh justrl2/configs/minicpm5-2.6b-math-128k.env
+bash justrl2/train.sh justrl2/configs/minicpm-2b-math-128k.env
 ```
 
 Override any knob through the environment, e.g. `GAE_LAMBDA_K=0.4 CRITIC_VALUE_BIAS_INIT=0.5`.

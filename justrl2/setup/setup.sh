@@ -31,7 +31,7 @@ else
 fi
 
 # Apply the miles patch set to the Megatron-LM submodule. The patch is what wires
-# miles' scalar value-head critic and MiniCPM5 support into the Megatron rollout —
+# miles' scalar value-head critic and MiniCPM support into the Megatron rollout —
 # it MUST be applied or the critic's output_layer/LM-head handling breaks. The
 # marker file makes the patch idempotent (re-running setup.sh is a no-op).
 cd Megatron-LM

@@ -37,10 +37,10 @@ The miles-side patches are included here:
 
 - **Megatron**: `third_party/patches/megatron.patch` — applied by `justrl2/setup/setup.sh`.
   This is what wires miles' **scalar value-head critic** (`LinearForLastLayer`) and the
-  MiniCPM5 family into Megatron. Clone NVIDIA Megatron-LM, apply the patch, and the
-  `afedb9da…` fork's miles-facing behavior is recovered. The fork also carries MiniCPM5
+  MiniCPM family into Megatron. Clone NVIDIA Megatron-LM, apply the patch, and the
+  `afedb9da…` fork's miles-facing behavior is recovered. The fork also carries MiniCPM
   architecture support (dense Llama-arch with QKV GQA, RMSNorm, svg activated) — if your
-  upstream lacks the MiniCPM5 config, port the `minicpm5` config/attention bits.
+  upstream lacks the MiniCPM config, port the `minicpm5` (the fork's internal name for this family) config/attention bits.
 - **sglang**: `third_party/patches/sglang.patch` mirrors the fork. The **DSpark** speculative
   decoding (`--sglang-speculative-algorithm DSPARK`, draft model, block size, draft window)
   is a newer fork feature than the base sglang release; to reproduce it you need the
@@ -63,9 +63,9 @@ the full Megatron rollout.
 
 ## Model weights
 
-`bash justrl2/prepare_model.sh` downloads `openbmb/MiniCPM5-2.6B` (HF format) and converts
+`bash justrl2/prepare_model.sh` downloads `openbmb/MiniCPM-2B` (HF format) and converts
 it to the Megatron `torch_dist` layout with `tools/convert_hf_to_torch_dist.py`; with
-`WITH_DSPARK=1` it also fetches the `openbmb/MiniCPM5-2.6B-DSpark-5L` draft model for
+`WITH_DSPARK=1` it also fetches the `openbmb/MiniCPM-2B-DSpark-5L` draft model for
 speculative decoding. `train.sh` refuses to start if either model path is missing, so a
 typo cannot fall through to a random-init run. Always point `MEGATRON_MODEL_PATH` at the
 parent `torch_dist` directory, not an `iter_xxx` subdirectory.

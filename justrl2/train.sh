@@ -1,8 +1,8 @@
 #!/bin/bash
-# JustRL2 launcher: MiniCPM5-2.6B math RL with a scalar value-head critic,
+# JustRL2 launcher: MiniCPM-2B math RL with a scalar value-head critic,
 # length-adaptive GAE (lambda_i = k^(1/L_i)) and a mean-reward-seeded value head.
 #
-#   bash justrl2/train.sh justrl2/configs/minicpm5-2.6b-math-128k.env [extra miles args...]
+#   bash justrl2/train.sh justrl2/configs/minicpm-2b-math-128k.env [extra miles args...]
 #
 # All knobs live in the .env file (every line there is a default that an exported
 # shell variable overrides). This script only turns them into miles arguments and
@@ -32,7 +32,7 @@ for f in $TRAIN_FILE; do
   [ -f "$f" ] || { echo "FATAL: train file $f does not exist (see justrl2/prepare_data.py)" >&2; exit 1; }
 done
 
-# MiniCPM5 ships its modeling code with the HF checkpoint (trust_remote_code); make it
+# MiniCPM-2B ships its modeling code with the HF checkpoint (trust_remote_code); make it
 # importable for every Ray worker.
 HF_MODULES_DIR=${HF_MODULES_DIR:-/root/.cache/huggingface/modules}
 HF_DYNAMIC_MODULE_DIR="${HF_MODULES_DIR}/transformers_modules/$(basename "$HF_MODEL_DIR" | sed 's/\./_dot_/g; s/-/_/g')"
@@ -44,7 +44,7 @@ done
 
 export SGLANG_PATH=${WORK_DIR}/sglang
 export PYTHONPATH=.:Megatron-LM:mbridge:${SGLANG_PATH}/python:${HF_MODULES_DIR}
-source justrl2/model_args/minicpm5-2.6b.sh
+source justrl2/model_args/minicpm-2b.sh
 
 # ---- topology: PPO needs actor and critic world sizes equal (rank-pairwise NCCL groups) ----
 ACTOR_NUM_NODES=${ACTOR_NUM_NODES:-$((WORLD_SIZE / 2))}

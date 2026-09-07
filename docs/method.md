@@ -2,7 +2,10 @@
 
 JustRL2 is PPO for long-context (128k) math reasoning with a **separate critic that has no
 language-model head**, a **mean-reward-seeded value head**, and a **length-adaptive GAE λ**.
-This page explains each piece and points at the code. File paths are relative to the repo
+This page explains each piece and points at the code; the full write-up with experiments
+and ablations is the blog post [JustRL-II: Scaling Small LLMs to 128k Reasoning with a
+Critic](https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic)
+([中文](https://panhaoxuan.notion.site/justrl-ii-small-llms-to-128k-reasoning-with-a-critic-cn)). File paths are relative to the repo
 root; the framework is [Miles](https://github.com/radixark/miles) (SGLang rollout +
 Megatron-LM training).
 
@@ -30,7 +33,7 @@ Why not the usual `N(0, 0.02)` weight: on a 2048-wide hidden state that gives
 loss then opens at `E[r²] ≈ 0.5` with a first critic gradient norm of 130–140, and the head
 spends its first ~25 steps learning the offset *while the policy already updates against it*.
 Seeded at the mean reward the loss opens at `Var(r) ≈ 0.25` and the gradient norm stays
-under 40 from step 0 — the transient is gone at zero cost (paper, value-head-init figure).
+under 40 from step 0 — the transient is gone at zero cost (blog, value-head-init figure).
 
 **After loading the base checkpoint.** The critic starts from the policy/base checkpoint.
 Megatron's dist-ckpt reader fills the `[1, H]` head from the overlapping region of the
@@ -104,6 +107,6 @@ mixture of correctness and length. The actor's advantages are unchanged.
 
 ## 7. Optional: DSpark speculative decoding
 
-Set `DSPARK_DRAFT_MODEL_PATH` to a MiniCPM5-2.6B Draft-5L model and SGLang runs DSpark
+Set `DSPARK_DRAFT_MODEL_PATH` to a MiniCPM-2B Draft-5L model and SGLang runs DSpark
 speculative decoding (block size 7). Requires the sglang fork commit in
 `third_party/README.md`. Off by default; when off the launcher passes nothing.

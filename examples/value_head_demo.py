@@ -18,7 +18,7 @@ What it shows:
 
 How to run (container, py>=3.10):
 
-    python3 examples/reproducibility/minicpm5_value_head_demo.py
+    python3 examples/value_head_demo.py
 
 This mirrors `LinearForLastLayer` (miles/backends/megatron_utils/model_provider.py):
 the critic replaces `output_layer` with a zeroed `[1, hidden]` weight + a `[1]` bias
@@ -31,7 +31,7 @@ import time
 
 import torch
 
-HIDDEN = 128          # toy hidden size (real MiniCPM5-2.6B: 2048)
+HIDDEN = 128          # toy hidden size (real MiniCPM-2B: 2048)
 # Critic LR. NOTE: for a *converging toy* we use a demonstrative 1e-3; the real recipe uses
 # --critic-lr 5e-6 over full rollout steps (the head converges over ~30 critic-only steps).
 LR = 1e-3
