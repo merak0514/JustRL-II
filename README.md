@@ -2,15 +2,15 @@
 
 # MiniCPM5-2.6B Math RLARM — #12 (`main_cc_nolm_s9`) Open-Source Reproduction
 
-**Algorithm = JustRL2**: cc-noLM critic + VAPO length-adaptive GAE on 128k-context math RL
+**Algorithm = JustRL2**: cc-noLM critic (mean-reward-seeded value head) + length-adaptive GAE `λ = k^(1/L)` on 128k-context math RL
 
 </div>
 
 This is an open-source reproduction package for math_recipe experiment **#12**, tag
 `main_cc_nolm_s9`: MiniCPM5-2.6B trained on math with a **critic-only (no-LM-head) value
 head**, over 128k context, on the `s9` math dataset. We call the algorithm **JustRL2** —
-the cc-noLM(value-head-only) critic + VAPO length-adaptive GAE recipe that is the point of
-#12. The framework it runs on is **Miles** — a fork of the Apache-2.0
+the cc-noLM (value-head-only) critic + length-adaptive GAE recipe that is the point of
+#12, with two refinements over what #12 literally ran (see *What #12 ran vs. what ships*). The framework it runs on is **Miles** — a fork of the Apache-2.0
 [Miles](https://github.com/radixark/miles) RL framework (SGLang + Megatron-LM) — at commit
 **`b62206c9`** on `phx_dev_recipe2`, with the MiniCPM5-2.6B model args and the scalar
 value-head critic that are the focus of #12. The codebase keeps the name `miles` for
@@ -32,12 +32,16 @@ JustRL2 = PPO with a **separate critic** whose `output_layer` is a **scalar valu
 (`output_size=1`) instead of an LM head. The critic regresses the GAE return; the actor
 takes the PPO surrogate on the resulting advantages. Three things make it work:
 
-1. The value head is **zero-initialized** and **re-zeroed after a policy/base-ckpt load**
-   (so the LM head row 0 can't pollute it) — commit `1faf7ad4c` lineage.
+1. The value head's **weight is zero-initialized** and its **bias is seeded at the
+   expected mean reward** (`CRITIC_VALUE_BIAS_INIT=0.52`), so at step 0 `V ≡ 0.52` — the
+   critic starts as a sensible prior instead of spending ~25 steps learning the offset.
+   Both are **re-applied after a policy/base-ckpt load** (so the LM head row 0 can't
+   pollute the weight and the load path can't reset the bias) — commit `1faf7ad4c` lineage.
 2. A **critic-only warmup** (`NUM_CRITIC_ONLY_STEPS=30`): the actor is frozen while the
    value head converges, so the first policy update sees a sensible baseline.
-3. **VAPO length-adaptive GAE** (`VAPO_LAMBDA_ALPHA=1.5`): per-sample
-   `λ_i = clamp(1 − 1/(α·L_i), 0)`, with the value target as the λ=1 suffix-reward sum.
+3. **Length-adaptive GAE** (`VAPO_LAMBDA_K`): per-sample `λ_i = k^(1/L_i)`, so the first
+   token always receives fraction `k` of the terminal credit (`λ_i^L_i = k`) regardless of
+   response length; the value target stays the λ=1 suffix-reward sum.
 
 Plus partial-rollout + over-sampling for long-context memory, and DSpark speculative
 decoding when a draft model is available.
@@ -61,7 +65,7 @@ miles-opensource/
 ├── docker/patch/latest/       # megatron.patch + sglang.patch (pip into the forks)
 ├── models/README.md           # submodule + weight sourcing (the gate)
 ├── examples/reproducibility/  # run-qwen2.5-0.5B-gsm8k.sh (upstream) + value-head demo
-├── tests/                     # incl. tests/test_chunked_gae.py (VAPO GAE)
+├── tests/                     # incl. test_vapo_lambda_k.py, test_critic_value_bias_init.py
 ├── requirements.txt
 ├── pyproject.toml / setup.py / LICENSE (Apache-2.0)
 ```
@@ -131,7 +135,7 @@ or just:
 
 ```bash
 export EXP_TAG=main_cc_nolm_s9 CRITIC_EXCLUDE_OLP=1 SGLANG_MEM_FRACTION=0.83 \
-       DYNAMIC_SAMPLING=1 ROLLOUT_BATCH_SIZE=60 VAPO_LAMBDA_ALPHA=1.5 \
+       DYNAMIC_SAMPLING=1 ROLLOUT_BATCH_SIZE=60 VAPO_LAMBDA_K=0.513 CRITIC_VALUE_BIAS_INIT=0.52 \
        NUM_CRITIC_ONLY_STEPS=30 ENABLE_PARTIAL_ROLLOUT=1 OVER_SAMPLING_BATCH_SIZE=120 \
        EPS_CLIP_HIGH=0.28 LR=1e-6 NUM_ROLLOUT=500 EVAL_INTERVAL=1000 \
        SAVE_INTERVAL=5 HF_SAVE_INTERVAL=5
@@ -146,14 +150,27 @@ The GBS divisibility check: actor DP = `ACTOR_NODES*GPUS/TP/CP`; with the #12 va
 python3 examples/reproducibility/minicpm5_value_head_demo.py
 ```
 
-A toy scalar value-head check: it asserts the head starts at **exactly 0** and that
-gradient descent makes it track a return band. This is the mechanism (zero init + value
-regression) that the 128k critic relies on.
+A toy scalar value-head check: it asserts the head starts at **exactly the seeded prior**
+(zero weight, bias = 0.52) and that gradient descent makes it track a return band. This is
+the mechanism (prior-seeded init + value regression) that the 128k critic relies on.
+
+### What #12 ran vs. what ships
+
+Two knobs in this package are the JustRL2 refinements, not what job 825481 literally ran:
+
+| | #12 (job 825481, `b62206c9`) | this package (JustRL2) |
+|---|---|---|
+| value-head bias init | 0 | `--critic-value-bias-init 0.52` (validated on arm extra-1 with 0.5: +0.022 AIME at the 120-step window, warmup transient removed) |
+| length-adaptive λ | `1 − 1/(α·L)`, α=1.5 | `k^(1/L)`, k=0.513 ≡ same λ to <1e-6 at L ≥ 1000 |
+
+To reproduce #12 *literally*, pass `CRITIC_VALUE_BIAS_INIT=0`; the λ change is numerically
+a no-op at these lengths. `--vapo-lambda-alpha` no longer exists — use `--vapo-lambda-k`
+with `k = exp(−1/α)`.
 
 ## Naming
 
-- **JustRL2** — the *algorithm*: cc-noLM scalar value-head critic + VAPO length-adaptive
-  GAE + critic-only warmup. This is what the math_recipe #12 run instantiates.
+- **JustRL2** — the *algorithm*: cc-noLM scalar value-head critic (mean-reward-seeded bias) +
+  length-adaptive GAE `λ = k^(1/L)` + critic-only warmup. #12 is its first full run.
 - **Miles** — the *framework* the algorithm runs on (Apache-2.0, upstream
   [radixark/miles](https://github.com/radixark/miles)). The codebase keeps its name; we do
   **not** rename the framework to JustRL2, so its provenance and upstream diffs stay
@@ -173,36 +190,48 @@ loss** — the critic only regresses the GAE return. Removing the LM head avoids
 mismatch/pollution that would occur if the value head had to share (or be confused with) the
 `[vocab, hidden]` LM head.
 
-### 2. Value head zero-init + post-load re-zero (the critical fix)
+### 2. Value head init: zero weight + mean-reward bias, re-applied after load (the critical fix)
 
-- `LinearForLastLayer.__init__` zeroes the `[1, hidden]` weight and `[1]` bias for
-  `output_size==1`. With a normal `N(0, 0.02)` init the value output has
-  std `0.02·√H·rms(h) ≈ 9.7` while the targets are in `[0,1]` — off by ~10×, needing
-  ~90 optimizer steps just to reach the band. Zero init makes `V ≡ 0` at step 0, so
-  `--normalize-advantages` degrades to exactly whitened reward (GRPO-like failure-safe
-  start) while the gradient `dV/dw = h ≠ 0` still flows.
+- `LinearForLastLayer.__init__` zeroes the `[1, hidden]` weight and fills the `[1]` bias
+  with `--critic-value-bias-init` (JustRL2 default **0.52**, the expected mean reward on
+  the s9 math mix). With a zero weight `V == bias` at step 0, so the bias *is* the
+  critic's prior. With a normal `N(0, 0.02)` weight the value output has std
+  `0.02·√H·rms(h) ≈ 9.7` while targets live in `[0,1]`; with a zero bias the value loss
+  opens at `E[r²] ≈ 0.5` and the critic gradient norm at 130–140, and the head spends its
+  first ~25 steps learning the offset *while the policy already updates against it*.
+  Seeded at the mean reward the loss opens at `Var(r) ≈ 0.25` and the gradient norm stays
+  under 40 from the first step — the whole transient disappears at zero cost.
 - After loading a **policy/base checkpoint**, `checkpoint.py:_rezero_critic_value_head`
-  re-zeroes the head and resyncs the fp32 master weights. Without this, Megatron's
-  dist-ckpt reader fills the `[1,H]` head from the overlapping LM-head region (measured
-  `w_absmax 0.189` → `V ~ ±8`), **completely destroying the run**. Commit `1faf7ad4c`
+  re-zeroes the weight, **re-fills the bias** with the same value, and resyncs the fp32
+  master weights. Without this, Megatron's dist-ckpt reader fills the `[1,H]` head from
+  the overlapping LM-head region (measured `w_absmax 0.189` → `V ~ ±8`) and the load
+  path resets the bias to 0 — **completely destroying the run**. Commit `1faf7ad4c`
   exists precisely to fix this first-training pollution. **If you port this pipeline and
-  skip `_rezero_critic_value_head`, the value head will be polluted and #12 will not
-  produce results.**
+  skip `_rezero_critic_value_head`, the value head will be polluted and the prior lost.**
+  Verify at startup: the log line `[critic-value-head] re-zeroed [...] (bias_init=0.52, master
+  params resynced)`.
 
-### 3. VAPO length-adaptive GAE (`vapo_lambda_alpha=1.5`, γ=1)
+### 3. Length-adaptive GAE (`vapo_lambda_k`, γ=1)
 
-`get_advantages_and_returns_batch` ([`ppo_utils.py`](miles/utils/ppo_utils.py) 657–755)
-uses a per-sample λ:
+`get_advantages_and_returns_batch` ([`ppo_utils.py`](miles/utils/ppo_utils.py)) uses a
+per-sample λ from `vapo_lambda_rowwise`:
 
 ```
-λ_i = clamp(1 − 1/(α·L_i), 0)
+λ_i = k ^ (1 / L_i)
 ```
 
-The **advantage** is computed with `lambd = λ_i` (row-wise), while the **value target**
-(`returns`) is the `λ = 1` suffix-reward sum. This decouples the baseline target from the
-advantage discount — longer sequences get effectively smaller λ (more myopic advantage),
-which is the VAPO insight that lifts AIME. The same α also drives the optional
-`--olp-analytic-inject` radius.
+We want the fraction of terminal credit that propagates back to the first token to stay a
+constant `k` regardless of response length. With γ=1 the GAE weight of the terminal reward
+at the first token is `λ_i^L_i`, and this choice makes it exactly `k`: longer responses get a
+λ closer to 1, so credit propagation does not weaken with length. The **advantage** uses
+`λ_i` row-wise; the **value target** (`returns`) is the `λ = 1` suffix-reward sum, so the
+critic target is decoupled from the advantage discount. λ is computed in fp32 — at 128k
+lengths `λ = 1 − O(1e-5)`, which bf16 rounds to exactly 1.0.
+
+Relation to the VAPO form: `1 − 1/(α·L)` is the first-order expansion of `k^(1/L)` with
+`k = e^(−1/α)`; the #12 run's `α = 1.5` corresponds to `k ≈ 0.513` (the two differ by
+< 1e-6 at L ≥ 1000, see `tests/test_vapo_lambda_k.py`). The same λ also drives the optional
+`--group-center-inject` decay.
 
 ### 4. Partial rollout + over-sampling
 

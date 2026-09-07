@@ -203,10 +203,17 @@ def _rezero_critic_value_head(ddp_model, optimizer, args):
         return
     if getattr(args, "critic_finetune_load_value_head", False):
         return
+    # JustRL2: the bias is re-seeded to --critic-value-bias-init (not zeroed) —
+    # the policy ckpt has no output_layer.bias, but the load path still resets it,
+    # and without this the construction-time prior would be silently lost.
+    bias_init = float(getattr(args, "critic_value_bias_init", 0.0))
     zeroed = []
     with torch.no_grad():
         for name, p in _iter_scalar_value_head_params(ddp_model):
-            p.zero_()
+            if name.endswith("bias"):
+                p.fill_(bias_init)
+            else:
+                p.zero_()
             zeroed.append(name)
     if not zeroed:
         return
@@ -221,7 +228,10 @@ def _rezero_critic_value_head(ddp_model, optimizer, args):
         # optimizer=None is the ref-model load path (actor.load_other_checkpoint);
         # there are no master weights to keep in sync.
         resync = "no optimizer, nothing to resync"
-    logger.info("[critic-value-head] re-zeroed %s after policy-ckpt load (%s)", zeroed, resync)
+    logger.info(
+        "[critic-value-head] re-zeroed %s after policy-ckpt load (bias_init=%.3g, %s)",
+        zeroed, bias_init, resync,
+    )
 
 
 def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_context, skip_load_to_model_and_opt):

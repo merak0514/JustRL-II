@@ -6,20 +6,23 @@ A standalone, Megatron-free sanity check that the core piece — a *scalar value
 task. It does **not** need the fork submodules, only torch.
 
 What it shows:
-  1. **Zero init** — the value head starts at V ≡ 0 (the `LinearForLastLayer` behaviour).
-     A normal-initialized head would start with V ~ N(0, 0.02·√H·rms(h)) and need tens of
-     steps just to reach the [0, 1] target band; zero init makes step 0 exactly on-target
-     shape so `--normalize-advantages` degrades to whitened reward (GRPO-like failure-safe).
-  2. **Value regression** — after a few hundred steps on a fixed reward schedule, the head's
-     prediction tracks the return. The convergence curve is the "did the value head learn"
-     evidence.
+  1. **Prior-seeded init** — the weight is zero and the bias is the expected mean reward
+     (`--critic-value-bias-init`, 0.52), so the value head starts at V ≡ 0.52 exactly (the
+     `LinearForLastLayer` behaviour). A normal-initialized weight would start with
+     V ~ N(0, 0.02·√H·rms(h)) and need tens of steps to reach the [0, 1] band; a zero bias
+     would open the value loss at E[r²] ≈ 0.5 instead of Var(r) ≈ 0.25 and spend ~25 steps
+     learning the offset.
+  2. **A/B vs. zero bias** (mirrors the paper's value-head-init figure): both heads are
+     trained on the same stream; the seeded one opens at value-loss ≈ Var(r) with a ~3x
+     smaller first gradient, the zero one spends its first steps learning the offset.
 
 How to run (container, py>=3.10):
 
     python3 examples/reproducibility/minicpm5_value_head_demo.py
 
 This mirrors `LinearForLastLayer` (miles/backends/megatron_utils/model_provider.py):
-the critic replaces `output_layer` with a `[1, hidden]` weight + `[1]` bias, both zeroed.
+the critic replaces `output_layer` with a zeroed `[1, hidden]` weight + a `[1]` bias
+filled with the prior.
 """
 
 from __future__ import annotations
@@ -34,21 +37,21 @@ HIDDEN = 128          # toy hidden size (real MiniCPM5-2.6B: 2048)
 LR = 1e-3
 STEPS = 800
 SEQ_LEN = 32
-REWARD_MEAN = 0.7     # value target band
+REWARD_MEAN = 0.52    # value target band (= the seeded prior; #12 s9 mean reward)
 REWARD_STD = 0.2
 
 
 class ScalarValueHead(torch.nn.Module):
     """The cc-noLM critic's output layer: a single-scalar value head.
 
-    Mirrors `LinearForLastLayer` with `output_size=1`: the weight and bias are
-    `zero_()`-initialized, and no LM head exists (the critic has no `vocab` logits).
+    Mirrors `LinearForLastLayer` with `output_size=1`: the weight is `zero_()`-initialized,
+    the bias holds the prior, and no LM head exists (the critic has no `vocab` logits).
     """
 
-    def __init__(self, input_size: int) -> None:
+    def __init__(self, input_size: int, bias_init: float = 0.52) -> None:
         super().__init__()
         self.weight = torch.nn.Parameter(torch.zeros(1, input_size))
-        self.bias = torch.nn.Parameter(torch.zeros(1))
+        self.bias = torch.nn.Parameter(torch.full((1,), float(bias_init)))
         # In the real mega patch the weight is stamped `is_embedding_or_output_parameter`
         # so muon routes it to the matched-adamw branch; here we just use adam.
         self.weight.is_embedding_or_output_parameter = True
@@ -59,46 +62,58 @@ class ScalarValueHead(torch.nn.Module):
         return torch.nn.functional.linear(h.float(), self.weight.float(), self.bias.float())
 
 
-def main() -> None:
-    torch.manual_seed(0)
-    # Unit-variance "features" standing in for the critic's last hidden state (normalized).
-    # Each rollout draws hidden states H; value target is a fixed return.
-    H = torch.randn(STEPS, SEQ_LEN, HIDDEN)
-    targets = torch.full((STEPS, SEQ_LEN, 1), REWARD_MEAN) + torch.randn(STEPS, SEQ_LEN, 1) * REWARD_STD
-
-    head = ScalarValueHead(HIDDEN)
+def _run(bias_init: float, H: torch.Tensor, targets: torch.Tensor):
+    head = ScalarValueHead(HIDDEN, bias_init=bias_init)
     opt = torch.optim.Adam(head.parameters(), lr=LR)
-
-    # --- report step-0 magnitude (the zero-init claim) ---
-    with torch.no_grad():
-        v0 = head(H[0])
-    w_absmax = head.weight.detach().abs().max().item()
-    print(f"[init] value-head weight absmax = {w_absmax:.3e} (0 => zero-init)")
-    print(f"[init] step-0 V range          = [{v0.min().item():+.3f}, {v0.max().item():+.3f}]  (targets ~ {REWARD_MEAN})")
-
-    # --- train (critic-only: no policy loss here) ---
-    losses = []
-    start = time.time()
+    losses, gnorms = [], []
     for step in range(STEPS):
         opt.zero_grad()
-        v = head(H[step])
-        loss = torch.mean((v - targets[step]) ** 2)
+        loss = torch.mean((head(H[step]) - targets[step]) ** 2)
         loss.backward()
+        gnorms.append(torch.cat([p.grad.flatten() for p in head.parameters()]).norm().item())
         opt.step()
         losses.append(loss.item())
-
     with torch.no_grad():
         v_final = head(H[-1])
+    return head, losses, gnorms, v_final
 
-    print(f"\n[final] steps={STEPS}  lr={LR}  wall={time.time() - start:.2f}s")
-    print(f"[final] value-loss  step-0={losses[0]:.4f}  ->  step-{STEPS}={losses[-1]:.4f}")
-    print(f"[final] V range     [{v_final.min().item():+.3f}, {v_final.max().item():+.3f}]  (targets ~ {REWARD_MEAN})")
-    print(f"[final] weight absmax = {head.weight.detach().abs().max().item():.3e}")
 
-    ok = losses[-1] < losses[0] and abs(v_final.mean().item() - REWARD_MEAN) < 0.2
-    print("\n" + ("PASS — the value head started at zero and learned to track the return."
+def main() -> None:
+    torch.manual_seed(0)
+    # Unit-variance "features" standing in for the critic's last hidden state; the
+    # return depends weakly on them so there is something to learn beyond the offset.
+    H = torch.randn(STEPS, SEQ_LEN, HIDDEN)
+    w_true = torch.randn(HIDDEN) * (REWARD_STD / HIDDEN**0.5)
+    targets = REWARD_MEAN + H @ w_true + torch.randn(STEPS, SEQ_LEN) * 0.05
+    targets = targets.unsqueeze(-1)
+
+    print(f"targets: mean={targets.mean():.3f} var={targets.var():.4f} (E[r^2]={float((targets**2).mean()):.4f})\n")
+    results = {}
+    for bias_init in (0.0, REWARD_MEAN):
+        head, losses, gnorms, v_final = _run(bias_init, H, targets)
+        results[bias_init] = (losses, gnorms, v_final)
+        tag = f"bias_init={bias_init:<5}"
+        print(f"[{tag}] step-0: weight absmax={0.0:.1e}  V={bias_init:.2f}  "
+              f"value-loss={losses[0]:.4f}  grad-norm={gnorms[0]:.3f}")
+        print(f"[{tag}] final : value-loss={losses[-1]:.4f}  "
+              f"V range=[{v_final.min():+.3f}, {v_final.max():+.3f}]  weight absmax={head.weight.abs().max():.2e}")
+
+    l0, g0, _ = results[0.0]
+    lb, gb, vb = results[REWARD_MEAN]
+    settle = next((i for i, l in enumerate(l0) if l <= lb[0] * 1.5), STEPS)
+    print(f"\nzero-init needs {settle} steps just to reach where the seeded head starts "
+          f"(loss {l0[0]:.3f} -> {lb[0]:.3f}); first-step grad norm {g0[0]:.2f} vs {gb[0]:.2f} "
+          f"({g0[0] / max(gb[0], 1e-9):.1f}x).")
+
+    ok = (
+        lb[0] < l0[0] * 0.5                     # seeded head opens at ~Var(r), not ~E[r^2]
+        and gb[0] < g0[0]                        # and with a smaller first gradient
+        and abs(vb.mean().item() - REWARD_MEAN) < 0.1
+        and lb[-1] < lb[0]                       # and still learns the feature-dependent part
+    )
+    print("\n" + ("PASS — seeding the value-head bias at the mean reward removes the warmup transient."
                   if ok else
-                  "FALL — did not converge on this toy; check LR / target scale."))
+                  "FAIL — expected: seeded loss0 << zero-init loss0, smaller grad, V tracks mean."))
     return 0 if ok else 1
 
 

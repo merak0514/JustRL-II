@@ -930,12 +930,25 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
             parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
             parser.add_argument(
-                "--vapo-lambda-alpha",
+                "--vapo-lambda-k",
                 type=float,
                 default=None,
-                help="VAPO length-adaptive decoupled GAE: advantages use per-sample "
-                "lambda = 1 - 1/(alpha * response_len) while returns use lambda = 1 "
-                "(unbiased critic target). Requires gamma == 1. None disables.",
+                help="JustRL2 length-adaptive decoupled GAE: advantages use per-sample "
+                "lambda_i = k ** (1 / L_i) with L_i the response length, so the first token "
+                "always receives fraction k of the terminal credit (lambda_i ** L_i == k) "
+                "regardless of length; returns use lambda = 1 (unbiased critic target). "
+                "Requires gamma == 1. None disables. (The older VAPO form 1 - 1/(alpha*L) is "
+                "the first-order expansion of this with k = exp(-1/alpha); alpha=1.5 ~ k=0.513.)",
+            )
+            parser.add_argument(
+                "--critic-value-bias-init",
+                type=float,
+                default=0.52,
+                help="Initial value of the critic's scalar value-head bias (the weight is "
+                "zero-initialized, so V == bias at step 0). Set it to the expected mean reward "
+                "so the critic does not spend its first ~25 steps learning the offset. Applied "
+                "both at construction and re-applied after a policy/base checkpoint load "
+                "(see checkpoint._rezero_critic_value_head). 0 restores the old zero init.",
             )
             parser.add_argument(
                 "--positive-lm-loss-coef",
@@ -1126,7 +1139,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=0.1,
                 help=(
                     "Decay radius alpha for --olp-analytic-inject, parametrized like "
-                    "--vapo-lambda-alpha: lambda = clamp(1 - 1/(alpha*L), min=0) with L the "
+                    "the old VAPO alpha form: lambda = clamp(1 - 1/(alpha*L), min=0) with L the "
                     "response length, so a token at distance d from the end gets weight lambda^d. "
                     "With 0.1 only roughly the last tenth of the response feels the penalty."
                 ),
@@ -1141,9 +1154,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "samples of one prompt) compute the terminal scalar a_j = raw_reward_j - V_j "
                     "(critic value at the sample's last loss-mask token) and inject "
                     "P_i = -sum_{j in g, j != i}(a_j)/(n_g - 1) into sample i's advantages with "
-                    "the same length-adaptive decay lambda_i = clamp(1 - 1/(alpha*L_i), min=0) as "
-                    "the VAPO decoupled GAE (alpha = --vapo-lambda-alpha, required; no separate "
-                    "alpha hyperparameter). Equivalent to subtracting the leave-one-out group "
+                    "the same length-adaptive decay lambda_i = k ** (1/L_i) as "
+                    "the length-adaptive decoupled GAE (k = --vapo-lambda-k, required; no separate "
+                    "hyperparameter). Equivalent to subtracting the leave-one-out group "
                     "baseline from the terminal reward and re-running GAE — but returns are "
                     "untouched: the critic keeps learning the uncentered return. a_j uses "
                     "raw_reward (pure task reward, no OLP/length shaping), so this composes with "
@@ -2680,16 +2693,15 @@ def miles_validate_args(args):
             "--group-center-inject only makes sense with a critic (--advantage-estimator ppo): "
             "the terminal scalar a_j = raw_reward_j - V_j needs critic values."
         )
-        assert getattr(args, "vapo_lambda_alpha", None), (
-            "--group-center-inject requires --vapo-lambda-alpha: the injection decay "
-            "lambda_i = clamp(1 - 1/(alpha*L_i), min=0) reuses it (no separate alpha "
-            "hyperparameter by design)."
+        assert getattr(args, "vapo_lambda_k", None), (
+            "--group-center-inject requires --vapo-lambda-k: the injection decay "
+            "lambda_i = k ** (1/L_i) reuses it (no separate hyperparameter by design)."
         )
         logger.info(
             "group_center_inject: ON — leave-one-out group centering injected into the actor's "
             "advantages after GAE (a_j = raw_reward_j - V_j at the last loss-mask token, "
-            "P_i = -mean of the other group members' a_j, decayed with the VAPO lambda, "
-            f"alpha={getattr(args, 'vapo_lambda_alpha', None)}); "
+            "P_i = -mean of the other group members' a_j, decayed with the length-adaptive lambda, "
+            f"k={getattr(args, 'vapo_lambda_k', None)}); "
             "returns untouched — the critic keeps learning the uncentered return."
         )
 

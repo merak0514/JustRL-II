@@ -91,18 +91,10 @@ OPTIMIZER=${OPTIMIZER:-adam}
 # DSPARK_DRAFT_MODEL_PATH 为空 => 完全不启用；此时生成的 sglang 参数列表与
 # runtime env 与加本块之前完全一致。在跑的 128k 臂复用本脚本，默认路径不能被影响。
 #
-# draft 与 target 必须配对，错配会掉接受率。draft 模型（MiniCPM5-2.6B-DSpark-5L）需自备，
-# 见 README「DSpark 投机采样」一节：DSPARK_DRAFT_MODEL_PATH 指向本地下载的 draft 目录。
-#   MiniCPM5-2.6B-0803-DSpark-5L-Adapt200k   （无 PROVENANCE.md）
-#   MiniCPM5-2.6B-0804-DSpark-5L-Adapt200k   <- 名义上配 0804/681336 底模（当前配方底模）
-#   MiniCPM5-2.6B-0810-DSpark-5L-Adapt200k   （有 PROVENANCE.md，target 是 128k midtrain SFT）
-#
-# ⚠️ 0804 那个 draft 目录里只有 config.json + model.safetensors，没有 PROVENANCE.md，
-#    所以"它是按 0804 target 训的"只能从目录名推断，未经确认 —— 用前找王之尧确认。
-#    佐证：0810 的 PROVENANCE.md 里 target 确为 0810_job_683764，说明日期前缀=target 日期
-#    这个命名约定是真的（且 0810 是从 0804 warm start 的），但这仍是推断而非确认。
-#    另外 0810 的 target 是 after_midtrain_128k_sft，比 0804 更贴我们的 128k 场景，
-#    接受率实测 0.400 / 平均接受长度 3.80 @ gamma 7 —— 值得和 0804 一起对比一把。
+# draft 与 target 必须配对，错配会掉接受率。draft 模型（MiniCPM5-2.6B-DSpark-5L，5 层 decoder，
+# config.json 里 block_size=7）需自备，见 README「DSpark 投机采样」一节：DSPARK_DRAFT_MODEL_PATH
+# 指向本地下载的 draft 目录。日期前缀=target 底模日期的命名约定：draft 必须是按你实际使用的
+# 底模训出来的那一份。参考接受率：0.40 / 平均接受长度 3.80 @ gamma 7（128k midtrain 配对）。
 #
 # DSPARK_BLOCK_SIZE 默认 7：三个 draft 的 config.json 都是 block_size=7（已核对），不要改。
 # 128k 显存：ragged verify 的 graph capture 比纯 decode 更吃显存（short_rl 的 dspark
@@ -307,17 +299,22 @@ PPO_ARGS=(
   --eps-clip 0.2
   --eps-clip-high ${EPS_CLIP_HIGH:-0.2}   # PPO 首版用经典对称 clip；clip-higher 是 GRPO/DAPO 技巧
   --value-clip ${VALUE_CLIP:-0.2}
-  # critic warmup: value head 零初始化 (1faf7ad4c 修复后从真零起步, value_loss 起点 ~0.6
-  # 而非污染时代的 ~26), fresh 默认 20 步足够收敛到 ~0.3 带; 热启 (CRITIC_WARM_LOAD) 传 5
+  # critic warmup: value head weight 零初始化 + bias 初始化到平均奖励 (CRITIC_VALUE_BIAS_INIT),
+  # value_loss 从 ~Var(r)≈0.25 起步; fresh 默认 20 步足够收敛; 热启 (CRITIC_WARM_LOAD) 传 5
   --num-critic-only-steps ${NUM_CRITIC_ONLY_STEPS:-20}
   --critic-lr ${CRITIC_LR:-5e-6}
   --critic-lr-warmup-iters ${CRITIC_LR_WARMUP_ITERS:-10}
 )
 
-# VAPO 组件（可选）: VAPO_LAMBDA_ALPHA 开长度自适应解耦 GAE, POSITIVE_LM_LOSS_COEF 开正例 LM loss
-if [ -n "${VAPO_LAMBDA_ALPHA:-}" ]; then
-  PPO_ARGS+=(--vapo-lambda-alpha ${VAPO_LAMBDA_ALPHA})
+# JustRL2 length-adaptive 解耦 GAE: VAPO_LAMBDA_K 给出首 token 拿到的终端 credit 比例 k,
+# 逐样本 λ_i = k^(1/L_i) (#12 实跑的旧 VAPO 形式 1−1/(α·L), α=1.5 等价于 k=e^(−1/1.5)≈0.513)。
+# POSITIVE_LM_LOSS_COEF 开正例 LM loss (可选)。
+if [ -n "${VAPO_LAMBDA_K:-}" ]; then
+  PPO_ARGS+=(--vapo-lambda-k ${VAPO_LAMBDA_K})
 fi
+# JustRL2 critic value-head bias 初始化 (weight 零初始化, 故 step-0 的 V ≡ bias): 设为期望
+# 平均奖励, 省掉 critic 头 ~25 步学 offset 的过渡期。加载底模后 checkpoint.py 会重新填回。
+PPO_ARGS+=(--critic-value-bias-init ${CRITIC_VALUE_BIAS_INIT:-0.52})
 if [ -n "${POSITIVE_LM_LOSS_COEF:-}" ]; then
   PPO_ARGS+=(--positive-lm-loss-coef ${POSITIVE_LM_LOSS_COEF})
   if [ "${POSITIVE_LM_DIFFICULTY_WEIGHT:-1}" != "1" ]; then
@@ -359,7 +356,7 @@ fi
 
 # 臂#16: 组中心化注入 — actor 的 advantage 通道做组内留一中心化: 终端标量 a_j = raw_reward_j − V_j
 # (最后一个 loss-mask token 的 critic value), P_i = −(组内其余成员 a_j 之和)/(n−1), GAE 之后按
-# vapo λ_i 衰减注入 (alpha 复用 VAPO_LAMBDA_ALPHA, 参数校验要求其非空); critic 照学未中心化
+# λ_i 衰减注入 (k 复用 VAPO_LAMBDA_K, 参数校验要求其非空); critic 照学未中心化
 # return。a_j 用 raw_reward (纯任务奖励), 与 OLP_ANALYTIC_INJECT 可共存 (两个线性注入相加)。默认关。
 if [ "${GROUP_CENTER_INJECT:-0}" = "1" ]; then
   PPO_ARGS+=(--group-center-inject)

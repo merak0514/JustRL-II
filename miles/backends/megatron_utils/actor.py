@@ -361,7 +361,7 @@ class MegatronTrainRayActor(TrainRayActor):
         # --critic-exclude-overlong-penalty / --critic-exclude-length-reward: 只在 critic 进程里
         # 把 GAE 的 reward 换成剔除对应 shaping 项后的版本 (rollout 侧已按开关组合算好
         # critic_rewards), 使 value-loss 的回归目标 (returns) 不再学习这些 shaping 项;
-        # values/KL/γ/λ (含 vapo_lambda_alpha 解耦路径) 与主路径完全一致。actor 进程
+        # values/KL/γ/λ (含 vapo_lambda_k 解耦路径) 与主路径完全一致。actor 进程
         # 单独调用 compute_advantages_and_returns 且看不到这次替换, advantage 不受影响。
         exclude_olp = getattr(self.args, "critic_exclude_overlong_penalty", False)
         exclude_lenrw = getattr(self.args, "critic_exclude_length_reward", False)

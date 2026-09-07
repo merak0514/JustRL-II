@@ -32,6 +32,7 @@ class LinearForLastLayer(torch.nn.Linear):
         *,
         config: TransformerConfig,
         bias: bool = True,
+        bias_init: float = 0.0,
     ) -> None:
         super().__init__(in_features=input_size, out_features=output_size, bias=bias)
         self.sequence_parallel = config.sequence_parallel
@@ -62,7 +63,13 @@ class LinearForLastLayer(torch.nn.Linear):
         else:
             self.weight.data.normal_(mean=0.0, std=0.02)
         if bias:
-            self.bias.data.zero_()
+            # JustRL2: with a zero weight V == bias at step 0, so the bias is the
+            # critic's prior. Seeding it at the expected mean reward
+            # (--critic-value-bias-init, 0.52 for the s9 math mix) makes the value
+            # loss open at ~Var(r) instead of ~E[r^2] and keeps the first critic
+            # gradient norm ~3x smaller; with 0 the head spends its first ~25 steps
+            # learning the offset while the policy already updates against it.
+            self.bias.data.fill_(float(bias_init) if output_size == 1 else 0.0)
 
     def forward(
         self,
@@ -102,7 +109,10 @@ def get_model_provider_func(
             # Apply critic output layer if needed
             if post_process and role == "critic":
                 model.output_layer = LinearForLastLayer(
-                    input_size=model.config.hidden_size, output_size=1, config=model.config
+                    input_size=model.config.hidden_size,
+                    output_size=1,
+                    config=model.config,
+                    bias_init=getattr(args, "critic_value_bias_init", 0.0),
                 )
             return model
 
@@ -271,7 +281,12 @@ def get_model_provider_func(
             model = GPTModel(**kwargs)
 
         if post_process and role == "critic":
-            model.output_layer = LinearForLastLayer(input_size=config.hidden_size, output_size=1, config=config)
+            model.output_layer = LinearForLastLayer(
+                input_size=config.hidden_size,
+                output_size=1,
+                config=config,
+                bias_init=getattr(args, "critic_value_bias_init", 0.0),
+            )
 
         return model
 

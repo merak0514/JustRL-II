@@ -3,7 +3,7 @@
 语义: PPO(VAPO)线上, 在 actor 的 advantage 通道做组内留一中心化——终端标量
 a_j = raw_reward_j − V_j (该样本最后一个 loss-mask token 的 critic value), 注入量
 P_i = −(Σ_{j∈g, j≠i} a_j)/(n_g−1), GAE 之后按 λ_i^(L_i−1−t) 衰减注入
-(λ_i = clamp(1 − 1/(α·L_i), min=0), α = vapo_lambda_alpha); returns 不动,
+(λ_i = k^(1/L_i), k = vapo_lambda_k); returns 不动,
 critic 照学未中心化 return。
 
 覆盖:
@@ -36,9 +36,19 @@ from miles.utils.ppo_utils import get_advantages_and_returns_batch
 # ---------------------------------------------------------------------------
 
 
-def _expected_weights(length: int, alpha: float, max_len: int) -> torch.Tensor:
-    """逐位参考实现 (python 循环, 只用于测试): w[t] = λ^(L-1-t), t < L, 其余 0。"""
+def _expected_weights_alpha(length: int, alpha: float, max_len: int) -> torch.Tensor:
+    """OLP 注入 (臂#14, α 参数化) 的逐位参考: w[t] = λ^(L-1-t), λ = clamp(1 − 1/(α·L), 0)。"""
     lam = max(0.0, 1.0 - 1.0 / (alpha * length)) if length > 0 else 0.0
+    w = torch.zeros(max_len, dtype=torch.float32)
+    for t in range(length):
+        w[t] = lam ** (length - 1 - t)
+    return w
+
+
+def _expected_weights(length: int, k: float, max_len: int) -> torch.Tensor:
+    """group-center 注入 (k 参数化, 与 GAE 同款 λ_i = k^(1/L)) 的逐位参考:
+    w[t] = λ^(L-1-t), 首 token 权重恰为 λ^(L-1) = k^((L-1)/L)。"""
+    lam = k ** (1.0 / length) if length > 0 else 0.0
     w = torch.zeros(max_len, dtype=torch.float32)
     for t in range(length):
         w[t] = lam ** (length - 1 - t)
@@ -79,19 +89,19 @@ def _make_batch(lengths, dtype=torch.float32, seed=0, zero_base=False):
     return values, rewards, masks
 
 
-def _gc_ctx(raws, n_g, alpha, masks, positions=None, stats=None):
+def _gc_ctx(raws, n_g, k, masks, positions=None, stats=None):
     return dict(
         positions=positions if positions is not None else list(range(len(masks))),
         raw_rewards=raws,
         n_samples_per_prompt=n_g,
-        alpha=alpha,
+        k=k,
         loss_masks=masks,
         dp_group=None,
         stats_out=stats,
     )
 
 
-def _run_pair(lengths, values, rewards, gc, vapo_alpha=0.1, gamma=1.0, lambd=0.95):
+def _run_pair(lengths, values, rewards, gc, vapo_k=0.5, gamma=1.0, lambd=0.95):
     """同一批数据跑两次: 无注入基线 vs group_center 注入。"""
     kwargs = dict(
         total_lengths=[L + 7 for L in lengths],  # prompt_len=7, 注入只看 response 坐标
@@ -100,7 +110,7 @@ def _run_pair(lengths, values, rewards, gc, vapo_alpha=0.1, gamma=1.0, lambd=0.9
         rewards_list=[r.clone() for r in rewards],
         gamma=gamma,
         lambd=lambd,
-        length_adaptive_lambda_alpha=vapo_alpha,
+        length_adaptive_lambda_k=vapo_k,
     )
     adv0, ret0 = get_advantages_and_returns_batch(**kwargs)
     adv1, ret1 = get_advantages_and_returns_batch(**kwargs, group_center=gc)
@@ -127,9 +137,9 @@ def cp1_parallel_state(monkeypatch):
     ],
     ids=["n3", "n8"],
 )
-@pytest.mark.parametrize("vapo_alpha", [None, 0.1], ids=["plain_gae", "vapo_decoupled"])
-def test_loo_hand_computed(cp1_parallel_state, n_g, lengths, vapo_alpha):
-    alpha = 0.1
+@pytest.mark.parametrize("vapo_k", [None, 0.5], ids=["plain_gae", "vapo_decoupled"])
+def test_loo_hand_computed(cp1_parallel_state, n_g, lengths, vapo_k):
+    alpha = 0.5
     raws = [float(i % 2) for i in range(len(lengths))]  # 0/1 结果奖励
     values, rewards, masks = _make_batch(lengths, seed=42)
     # 样本 0 的 mask 尾部两位清零: 验证 a_j 取的是"最后一个 loss-mask token"的 V,
@@ -137,7 +147,7 @@ def test_loo_hand_computed(cp1_parallel_state, n_g, lengths, vapo_alpha):
     masks[0][-2:] = 0
     stats = {}
     gc = _gc_ctx(raws, n_g, alpha, masks, stats=stats)
-    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, vapo_alpha=vapo_alpha)
+    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, vapo_k=vapo_k)
 
     P = _reference_P(raws, values, lengths, masks, n_g)
     for i, L in enumerate(lengths):
@@ -160,7 +170,7 @@ def test_ng1_guard_noop(cp1_parallel_state):
     raws = [1.0, 0.0]
     values, rewards, masks = _make_batch(lengths, seed=1)
     stats = {}
-    gc = _gc_ctx(raws, n_g=1, alpha=0.1, masks=masks, stats=stats)
+    gc = _gc_ctx(raws, n_g=1, k=0.5, masks=masks, stats=stats)
     adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc)
     for i in range(len(lengths)):
         assert torch.equal(adv1[i], adv0[i])
@@ -176,15 +186,15 @@ def test_ng1_guard_noop(cp1_parallel_state):
 
 def test_injection_equals_terminal_reward_shift_rerun_gae(cp1_parallel_state):
     """GAE 对 reward 线性, γ=1 时终端脉冲 δ 对 advantage_t 的贡献是 δ·λ_i^(L−1−t)——
-    与注入衰减 (alpha=vapo_lambda_alpha) 同一公式。故注入 P_i 必须精确等价于把终端
+    与注入衰减 (k=vapo_lambda_k, λ_i=k^(1/L_i)) 同一公式。故注入 P_i 必须精确等价于把终端
     reward 加 P_i (即减去留一均值 μ_i) 后重跑 GAE 的 advantage; 而 returns 若走重跑
     路径会被改动——这正是选择解析注入而非改 reward 的原因。"""
-    n_g, alpha = 3, 0.1
-    lengths = [40, 25, 33, 60, 5, 12]  # 2 组 × 3; L=5 是 α·L≤1 → λ clamp 0 的短样本
+    n_g, alpha = 3, 0.5
+    lengths = [40, 25, 33, 60, 5, 12]  # 2 组 × 3; L=5 是 λ=k^(1/5) 较小的短样本
     raws = [1.0, 0.0, 0.0, 1.0, 1.0, 0.0]
     values, rewards, masks = _make_batch(lengths, seed=7)
     gc = _gc_ctx(raws, n_g, alpha, masks)
-    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, vapo_alpha=alpha)
+    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, vapo_k=alpha)
 
     P = _reference_P(raws, values, lengths, masks, n_g)
     rewards_ref = [r.clone() for r in rewards]
@@ -197,7 +207,7 @@ def test_injection_equals_terminal_reward_shift_rerun_gae(cp1_parallel_state):
         rewards_list=rewards_ref,
         gamma=1.0,
         lambd=0.95,
-        length_adaptive_lambda_alpha=alpha,
+        length_adaptive_lambda_k=alpha,
     )
     for i in range(len(lengths)):
         torch.testing.assert_close(adv1[i], adv_ref[i], rtol=1e-5, atol=1e-5)
@@ -214,16 +224,16 @@ def test_injection_equals_terminal_reward_shift_rerun_gae(cp1_parallel_state):
 
 
 def test_bf16_long_length_fp32_intermediates(cp1_parallel_state):
-    """L=8192, α=0.1 → λ = 1 − 1/819.2 ≈ 0.99878; bf16 (8 位尾数) 会把它舍入成 1.0,
+    """L=8192, k=1e-4 → λ = k^(1/L) ≈ 1 − 1.1e-3; bf16 (8 位尾数) 会把它舍入成 1.0,
     若权重/中心化标量在 bf16 里算, 起点 token 会吃到完整 P (灾难性翻转)。fp32 中间
-    计算下起点权重 λ^8191 ≈ e^-10 ≈ 4.5e-5。values/rewards 全零 → GAE 基线恒 0,
+    计算下起点权重 λ^8191 ≈ k = 1e-4。values/rewards 全零 → GAE 基线恒 0,
     输出即注入项本身, 可精确断言。"""
-    n_g, alpha, L = 2, 0.1, 8192
+    n_g, alpha, L = 2, 1e-4, 8192
     lengths = [L, L]
     raws = [1.0, 0.0]
     values, rewards, masks = _make_batch(lengths, dtype=torch.bfloat16, zero_base=True)
     gc = _gc_ctx(raws, n_g, alpha, masks)
-    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc)
+    adv0, ret0, adv1, ret1 = _run_pair(lengths, values, rewards, gc, vapo_k=alpha)
 
     # a = raw − V[last] = raw (V≡0) → P_0 = −a_1 = 0, P_1 = −a_0 = −1
     assert adv1[0].dtype == torch.bfloat16
@@ -245,7 +255,7 @@ def test_bf16_long_length_fp32_intermediates(cp1_parallel_state):
 def test_empty_response_guard(cp1_parallel_state):
     """L=0 (立即 EOS) 样本: a=0 (不用 raw−V, 因该行 full_values 全 0 且无有效终端),
     自身输出为空张量; 兄弟样本的 P 按 a=0 参与留一均值, 全程无 NaN。"""
-    n_g, alpha = 3, 0.1
+    n_g, alpha = 3, 0.5
     lengths = [6, 0, 4]
     raws = [1.0, 1.0, 0.0]  # 空响应样本 raw=1.0, 但 a 必须取 0 而非 1.0−V
     values, rewards, masks = _make_batch(lengths, seed=5)
@@ -266,7 +276,7 @@ def test_empty_response_guard(cp1_parallel_state):
 def test_all_zero_mask_fallback(cp1_parallel_state):
     """全零 loss mask (remove_sample/env_error/overlong_filtering 置零): last_idx 回退
     L−1, 样本仍以真实 raw−V[L−1] 贡献兄弟基线 (自身梯度已被 mask, 注入惰性无害)。"""
-    n_g, alpha = 2, 0.1
+    n_g, alpha = 2, 0.5
     lengths = [5, 5]
     raws = [1.0, 0.0]
     values, rewards, masks = _make_batch(lengths, seed=6)
@@ -297,7 +307,7 @@ def test_off_is_bitwise_noop(cp1_parallel_state):
         rewards_list=[r.clone() for r in rewards],
         gamma=1.0,
         lambd=0.95,
-        length_adaptive_lambda_alpha=0.1,
+        length_adaptive_lambda_k=0.5,
     )
     adv_a, ret_a = get_advantages_and_returns_batch(**kwargs)  # 主线 (不传新参数)
     adv_b, ret_b = get_advantages_and_returns_batch(**kwargs, group_center=None)
@@ -317,7 +327,7 @@ def test_scatter_positions_permutation_consistent(cp1_parallel_state):
     (p // n_g) 求组和, 数学上与多 rank 各持互斥 partition 再 allreduce(SUM) 等价
     (partition 互斥且覆盖全批, SUM 恰好拼出完整 a 向量)。断言: 任意本地排列下,
     每个 flat 样本的注入结果与自然序逐字节一致。"""
-    n_g, alpha = 3, 0.1
+    n_g, alpha = 3, 0.5
     flat_lengths = [10, 20, 30, 40, 50, 60]
     flat_raws = [1.0, 0.0, 1.0, 0.0, 1.0, 1.0]
     flat_values, flat_rewards, flat_masks = _make_batch(flat_lengths, seed=3)
@@ -349,7 +359,7 @@ def test_non_whole_groups_raises(cp1_parallel_state):
     lengths = [10, 20, 30, 40]
     raws = [1.0, 0.0, 1.0, 0.0]  # N_global=4, n_g=3 → 不是整组
     values, rewards, masks = _make_batch(lengths, seed=4)
-    gc = _gc_ctx(raws, n_g=3, alpha=0.1, masks=masks)
+    gc = _gc_ctx(raws, n_g=3, k=0.5, masks=masks)
     with pytest.raises(AssertionError, match="whole groups"):
         _run_pair(lengths, values, rewards, gc)
 
@@ -360,7 +370,7 @@ def test_non_whole_groups_raises(cp1_parallel_state):
 
 
 def test_coexists_with_olp_inject(cp1_parallel_state):
-    n_g, gc_alpha, olp_alpha = 3, 0.1, 0.2
+    n_g, gc_k, olp_alpha = 3, 0.5, 0.2
     lengths = [30, 44, 15]
     raws = [1.0, 0.0, 1.0]
     olp_pens = [-0.5, 0.0, -1.0]
@@ -372,16 +382,16 @@ def test_coexists_with_olp_inject(cp1_parallel_state):
         rewards_list=[r.clone() for r in rewards],
         gamma=1.0,
         lambd=0.95,
-        length_adaptive_lambda_alpha=0.1,
+        length_adaptive_lambda_k=0.5,
     )
     adv0, ret0 = get_advantages_and_returns_batch(**kwargs)
-    gc = _gc_ctx(raws, n_g, gc_alpha, masks)
+    gc = _gc_ctx(raws, n_g, gc_k, masks)
     adv2, ret2 = get_advantages_and_returns_batch(
         **kwargs, olp_inject_penalties=olp_pens, olp_inject_alpha=olp_alpha, group_center=gc
     )
     P = _reference_P(raws, values, lengths, masks, n_g)
     for i, L in enumerate(lengths):
-        expected = olp_pens[i] * _expected_weights(L, olp_alpha, L) + P[i] * _expected_weights(L, gc_alpha, L)
+        expected = olp_pens[i] * _expected_weights_alpha(L, olp_alpha, L) + P[i] * _expected_weights(L, gc_k, L)
         torch.testing.assert_close(adv2[i] - adv0[i], expected, rtol=1e-4, atol=1e-5)
         assert torch.equal(ret2[i], ret0[i])
 
