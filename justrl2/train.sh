@@ -61,7 +61,11 @@ SAVE_DIR=${SAVE_DIR:-${SAVE_ROOT}/${EXP_TAG}}
 CRITIC_SAVE_DIR=${CRITIC_SAVE_DIR:-${SAVE_DIR%/}_critic}
 EXP_NAME="${EXP_TAG}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$SAVE_DIR" "$CRITIC_SAVE_DIR"
+# Logs go next to the checkpoints (shared storage), never to the pod-local disk: a full
+# local disk makes the logger block and training stall silently while the job shows Running.
 export TENSORBOARD_DIR=${TENSORBOARD_DIR:-${SAVE_DIR}/tensorboard}
+export SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-${SAVE_DIR}/swanlog}
+mkdir -p "$TENSORBOARD_DIR" "$SWANLAB_LOG_DIR"
 
 CKPT_ARGS=(
   --hf-checkpoint "$HF_MODEL_DIR"
