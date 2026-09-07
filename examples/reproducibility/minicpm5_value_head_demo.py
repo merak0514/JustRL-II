@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal reproduction of #12's cc-noLM value-head critic.
+"""Minimal reproduction of JustRL2 (#12)'s cc-noLM value-head critic.
 
 A standalone, Megatron-free sanity check that the core piece — a *scalar value head*
 (`output_size=1`, zero-initialized) trained on GAE returns — actually learns on a toy

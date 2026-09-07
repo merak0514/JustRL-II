@@ -1,4 +1,4 @@
-# #12 — config mapping (main_cc_nolm_s9)
+# JustRL2 (#12) — config mapping (main_cc_nolm_s9)
 
 The #12 run is **not** a separate config file in the original repo; it is the entry script
 `scripts/minicpm5/2_6b/long_rl/run-minicpm5-26b-long-math-128k-ppo.sh` driven by the
@@ -34,7 +34,8 @@ Not shown but part of #12's recipe: `N_SAMPLES_PER_PROMPT=8`, `TENSOR_MODEL_PARA
 `main_cc_nolm_s9` = **cc**ritic with **no LM head** (`cc-noLM`), `s9` dataset. The critic is
 a separate dense model whose `output_layer` is a **scalar value head** (`output_size=1`),
 replacing the LM head. There is no language-modeling loss on the critic — it only regresses
-the value (GAE return). See *Technical core* in the README.
+the value (GAE return). The cc-noLM critic + VAPO GAE recipe is what we call **JustRL2**.
+See *Technical core* in the README.
 
 ## Launch (single node)
 

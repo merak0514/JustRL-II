@@ -2,16 +2,19 @@
 
 # MiniCPM5-2.6B Math RLARM — #12 (`main_cc_nolm_s9`) Open-Source Reproduction
 
-**cc-noLM critic + VAPO length-adaptive GAE on 128k-context math RL (GRPO→PPO)**
+**Algorithm = JustRL2**: cc-noLM critic + VAPO length-adaptive GAE on 128k-context math RL
 
 </div>
 
 This is an open-source reproduction package for math_recipe experiment **#12**, tag
 `main_cc_nolm_s9`: MiniCPM5-2.6B trained on math with a **critic-only (no-LM-head) value
-head**, over 128k context, on the `s9` math dataset. The framework is **Miles** — a fork of
-the Apache-2.0 [Miles](https://github.com/radixark/miles) RL framework (SGLang + Megatron-LM)
-— at commit **`b62206c9`** on `phx_dev_recipe2`, with the MiniCPM5-2.6B model args and the
-scalar value-head critic that are the focus of #12.
+head**, over 128k context, on the `s9` math dataset. We call the algorithm **JustRL2** —
+the cc-noLM(value-head-only) critic + VAPO length-adaptive GAE recipe that is the point of
+#12. The framework it runs on is **Miles** — a fork of the Apache-2.0
+[Miles](https://github.com/radixark/miles) RL framework (SGLang + Megatron-LM) — at commit
+**`b62206c9`** on `phx_dev_recipe2`, with the MiniCPM5-2.6B model args and the scalar
+value-head critic that are the focus of #12. The codebase keeps the name `miles` for
+provenance; only the **algorithm** is branded JustRL2.
 
 > **Scope / honesty note.** This is *not* a byte-exact re-ship of the internal training stack.
 > The internal run used three **private forks** (Megatron-LM, mbridge, sglang) that are not
@@ -23,9 +26,9 @@ scalar value-head critic that are the focus of #12.
 
 ---
 
-## The #12 recipe in one paragraph
+## The JustRL2 recipe in one paragraph
 
-PPO with a **separate critic** whose `output_layer` is a **scalar value head**
+JustRL2 = PPO with a **separate critic** whose `output_layer` is a **scalar value head**
 (`output_size=1`) instead of an LM head. The critic regresses the GAE return; the actor
 takes the PPO surrogate on the resulting advantages. Three things make it work:
 
@@ -146,6 +149,15 @@ python3 examples/reproducibility/minicpm5_value_head_demo.py
 A toy scalar value-head check: it asserts the head starts at **exactly 0** and that
 gradient descent makes it track a return band. This is the mechanism (zero init + value
 regression) that the 128k critic relies on.
+
+## Naming
+
+- **JustRL2** — the *algorithm*: cc-noLM scalar value-head critic + VAPO length-adaptive
+  GAE + critic-only warmup. This is what the math_recipe #12 run instantiates.
+- **Miles** — the *framework* the algorithm runs on (Apache-2.0, upstream
+  [radixark/miles](https://github.com/radixark/miles)). The codebase keeps its name; we do
+  **not** rename the framework to JustRL2, so its provenance and upstream diffs stay
+  auditable.
 
 ---
 
