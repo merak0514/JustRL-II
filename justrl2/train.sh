@@ -33,7 +33,9 @@ for f in $TRAIN_FILE; do
 done
 
 export SGLANG_PATH=${WORK_DIR}/sglang
-export PYTHONPATH=.:Megatron-LM:${SGLANG_PATH}/python
+# EXTRA_PYTHONPATH: optional extra entries (e.g. a HF dynamic-modules cache for checkpoints
+# that ship custom modeling code); appended for the driver and every Ray worker.
+export PYTHONPATH=.:Megatron-LM:${SGLANG_PATH}/python${EXTRA_PYTHONPATH:+:$EXTRA_PYTHONPATH}
 source justrl2/model_args/minicpm-2b.sh
 
 # ---- topology: PPO needs actor and critic world sizes equal (rank-pairwise NCCL groups) ----
@@ -202,7 +204,12 @@ EVAL_ARGS=(
 
 TRACK_ARGS=(--use-tensorboard)
 [ "$USE_WANDB" = 1 ] && TRACK_ARGS+=(--use-wandb --wandb-project "${WANDB_PROJECT:-justrl2}")
-[ "$USE_SWANLAB" = 1 ] && TRACK_ARGS+=(--use-swanlab --swanlab-project "${SWANLAB_PROJECT:-justrl2}" --swanlab-experiment-name "$EXP_NAME")
+# The project name is read from MILES_SWANLAB_PROJECT, not SWANLAB_PROJECT: the swanlab SDK
+# parses SWANLAB_* env vars at import time and a plain string there fails validation.
+if [ "$USE_SWANLAB" = 1 ]; then
+  unset SWANLAB_PROJECT
+  TRACK_ARGS+=(--use-swanlab --swanlab-project "${MILES_SWANLAB_PROJECT:-justrl2}" --swanlab-experiment-name "$EXP_NAME")
+fi
 
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -c 'NV[0-9]' || true); NVLINK_COUNT=${NVLINK_COUNT:-0}
 RUNTIME_ENV_JSON="{
