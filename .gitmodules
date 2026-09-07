@@ -1,0 +1,9 @@
+[submodule "Megatron-LM"]
+	path = Megatron-LM
+	url = git@codeup.aliyun.com:modelbest/scaling/Megatron-LM.git
+	branch = main_0129_lzh_minicpm5_moe
+
+[submodule "sglang"]
+	path = sglang
+	url = git@codeup.aliyun.com:modelbest/scaling/sglang.git
+	branch = minicpm
