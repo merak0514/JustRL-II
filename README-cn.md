@@ -56,7 +56,7 @@ python justrl2/eval.py --model runs/justrl2_minicpm5_2.6b_math128k/hf/iter_00002
 
 | 参数 | 值 | 作用 |
 |---|---|---|
-| `GAE_LAMBDA_K` | 0.513 | λ_i = k^(1/L_i)：无论回复多长，首 token 拿到的终端 credit 比例恒为 k |
+| `GAE_LAMBDA_K` | 0.5 | λ_i = k^(1/L_i)：无论回复多长，首 token 拿到的终端 credit 比例恒为 k |
 | `CRITIC_VALUE_BIAS_INIT` | 0.52 | value head 从平均奖励起步；消除约 25 步的 warmup 过渡期 |
 | `NUM_CRITIC_ONLY_STEPS` | 30 | critic 先收敛，再开始更新 policy |
 

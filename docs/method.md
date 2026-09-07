@@ -72,9 +72,10 @@ Two details:
 - **fp32.** At 128k, `λ = 1 − O(1e-5)`, which bf16 rounds to exactly 1.0; λ is computed in
   fp32 and only cast when handed to the GAE scan.
 
-`k = 0.513` is the release value; it equals `exp(−1/1.5)`, i.e. the first-order form
-`1 − 1/(α·L)` with α = 1.5 that the original internal run used (identical to < 1e-6 for L ≥ 1000,
-see `tests/test_gae_lambda_k.py`).
+`k = 0.5` is the release value: half of the terminal credit reaches the first token. The
+original internal run used the first-order form `1 − 1/(α·L)` with α = 1.5, which is
+`k = exp(−1/1.5) ≈ 0.513` (the two parametrisations agree to < 1e-6 per token at L ≥ 1000,
+see `tests/test_gae_lambda_k.py`); 0.5 is that value rounded.
 
 ## 4. Critic-only warmup
 

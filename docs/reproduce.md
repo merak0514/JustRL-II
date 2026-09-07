@@ -62,9 +62,9 @@ Two knobs in the released config are refinements over what that run literally ex
 | | original run | released config |
 |---|---|---|
 | value-head bias init | 0 | `CRITIC_VALUE_BIAS_INIT=0.52` (validated in a separate arm with 0.5: +0.022 AIME over the shared 120-step window, warmup transient removed) |
-| GAE λ | `1 − 1/(α·L)`, α = 1.5 | `k^(1/L)`, `GAE_LAMBDA_K=0.513` — numerically the same λ to < 1e-6 |
+| GAE λ | `1 − 1/(α·L)`, α = 1.5 (≡ k ≈ 0.513) | `k^(1/L)`, `GAE_LAMBDA_K=0.5` — same functional form, k rounded from 0.513 to 0.5 |
 
-To reproduce the original literally: `CRITIC_VALUE_BIAS_INIT=0`. Everything else
+To reproduce the original literally: `CRITIC_VALUE_BIAS_INIT=0 GAE_LAMBDA_K=0.513`. Everything else
 (rollout sizes, clip, warmup, overlong penalty, `CRITIC_EXCLUDE_OLP=1`, LR, dynamic
 sampling, partial rollout, DSpark) is as run.
 
