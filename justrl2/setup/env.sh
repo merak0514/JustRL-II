@@ -60,14 +60,6 @@ env | grep -E "NCCL*|LD_LIBRARY_PATH"
 export PROJECT_NAME=${PROJECT_NAME:-miles_open}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-math_ppo}
 
-# Checkpoint / output root — set these explicitly for your cluster.
-export CKPT_PATH=${CKPT_PATH:-${WORK_DIR}/checkpoints}
-export ROLLOUT_DATA_DIR=$CKPT_PATH/rollout_data
-mkdir -p $CKPT_PATH
-mkdir -p $ROLLOUT_DATA_DIR
-export TENSORBOARD_DIR=${TENSORBOARD_DIR:-${WORK_DIR}/tensorboard/$PROJECT_NAME/$EXPERIMENT_NAME}
-mkdir -p $TENSORBOARD_DIR
-
 ulimit -n 1048576 || true
 
 hostname -i
@@ -75,10 +67,8 @@ nvidia-smi
 free -h
 
 # SwanLab / WandB tracking. Set credentials via env (SWANLAB_API_KEY / WANDB_API_KEY);
-# no secret is hardcoded here. Set USE_SWANLAB=0 or USE_WANDB per launch script to disable.
+# no secret is hardcoded here. Log directories are chosen by train.sh (under SAVE_DIR).
 export SWANLAB_MODE=${SWANLAB_MODE:-cloud}
-export SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-${WORK_DIR}/swanlog}
-mkdir -p $SWANLAB_LOG_DIR
 
 # Set http_proxy/https_proxy/no_proxy yourself if your cluster needs an egress
 # proxy. This file intentionally ships with none.
