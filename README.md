@@ -5,6 +5,8 @@
 **PPO for 128k-context math reasoning with a head-less critic, a mean-reward-seeded value
 head and a length-adaptive GAE λ — MiniCPM5-2.6B recipe, code, data and weights.**
 
+[中文](README-cn.md)
+
 </div>
 
 JustRL2 trains MiniCPM5-2.6B on math with a separate critic whose only output is a scalar
@@ -55,15 +57,15 @@ python justrl2/eval.py --model runs/justrl2_minicpm5_2.6b_math128k/hf/iter_00002
 ```
 
 All hyper-parameters are in [`justrl2/configs/minicpm5-2.6b-math-128k.env`](justrl2/configs/minicpm5-2.6b-math-128k.env);
-any of them can be overridden from the shell (`GAE_LAMBDA_K=0.4 bash justrl2/train.sh …`).
+any of them can be overridden from the shell (`GAE_LAMBDA_K=0.5 bash justrl2/train.sh …`).
 
 ## The three numbers that matter
 
-| knob | value | why |
-|---|---|---|
-| `GAE_LAMBDA_K` | 0.513 | λ_i = k^(1/L_i): constant terminal-credit fraction k at the first token regardless of length |
-| `CRITIC_VALUE_BIAS_INIT` | 0.52 | value head starts at the mean reward; removes the ~25-step warmup transient |
-| `NUM_CRITIC_ONLY_STEPS` | 30 | critic converges before the first policy update |
+| knob                     | value | why                                                                                          |
+| ------------------------ | ----- | -------------------------------------------------------------------------------------------- |
+| `GAE_LAMBDA_K`           | 0.513 | λ_i = k^(1/L_i): constant terminal-credit fraction k at the first token regardless of length |
+| `CRITIC_VALUE_BIAS_INIT` | 0.52  | value head starts at the mean reward; removes the ~25-step warmup transient                  |
+| `NUM_CRITIC_ONLY_STEPS`  | 30    | critic converges before the first policy update                                              |
 
 ## Without the submodules
 
