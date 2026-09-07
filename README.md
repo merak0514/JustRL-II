@@ -9,13 +9,6 @@ head and a length-adaptive GAE λ — MiniCPM-2B recipe, code, data and weights.
 
 </div>
 
-JustRL2 trains MiniCPM-2B on math with a separate critic whose only output is a scalar
-value head (no LM head), initialised at the expected mean reward and re-initialised after
-the base-checkpoint load; advantages use a per-sample GAE λ = k^(1/L) so the first token of a
-100k-token solution receives the same fraction of terminal credit as the first token of a
-2k-token one. Everything else is standard PPO with DAPO-style overlong penalty, dynamic
-sampling and partial rollouts on the [Miles](https://github.com/radixark/miles) framework.
-
 - **Blog**: [JustRL-II: Scaling Small LLMs to 128k Reasoning with a Critic](https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic) — the full write-up, experiments and ablations this code implements.
 - **Method**: [`docs/method.md`](docs/method.md) — what each piece does and where it lives.
 - **Reproduce**: [`docs/reproduce.md`](docs/reproduce.md) — topology, launch, resume, eval.

@@ -8,8 +8,6 @@
 
 </div>
 
-JustRL2 用 PPO 在数学任务上训练 MiniCPM-2B。它和常规 PPO 的差别集中在 critic 上：critic 是一个独立模型，输出只有一个标量 value head，没有语言模型头；value head 的初始值设为期望平均奖励，加载底模权重之后再重新初始化一次，避免被 LM 头的权重污染。advantage 用逐样本的 GAE λ = k^(1/L)：λ 随回复长度自适应，使终端奖励传回首 token 的比例对任何长度都恒为 k，长回复不再因为 λ 的累积衰减而收不到信号。其余部分是标准 PPO，配 DAPO 式超长惩罚、dynamic sampling 与 partial rollout，运行在 [Miles](https://github.com/radixark/miles) 框架上。
-
 - **博客**：[JustRL-II：用 critic 把小模型推到 128k 推理](https://panhaoxuan.notion.site/justrl-ii-small-llms-to-128k-reasoning-with-a-critic-cn)（[English](https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic)）—— 完整的方法、实验与消融，本仓库是它的实现。
 - **方法**：[`docs/method.md`](docs/method.md) —— 每个组件做什么、代码在哪。
 - **复现**：[`docs/reproduce.md`](docs/reproduce.md) —— 拓扑、启动、续训、评测。
