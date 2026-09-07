@@ -1,0 +1,25 @@
+# __pycache__ / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# local weights / data (never committed)
+models/cache/
+datasets/
+runs/
+checkpoints/
+tensorboard/
+swanlog/
+nccl_trace/
+*.pt
+*.safetensors
+
+# ray / logs
+tmp/
+/ray_spill/
+/tmp/
+
+# OS
+.DS_Store

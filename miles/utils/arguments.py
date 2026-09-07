@@ -1,0 +1,2774 @@
+import argparse
+import json
+import logging
+import os
+from typing import Any
+
+import yaml
+from sglang_router.launch_router import RouterArgs
+from transformers import AutoConfig
+
+from miles.backends.sglang_utils.arguments import add_sglang_arguments
+from miles.backends.sglang_utils.arguments import validate_args as sglang_validate_args
+from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
+from miles.utils.environ import enable_experimental_rollout_refactor
+from miles.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
+from miles.utils.logging_utils import configure_logger
+from miles.utils.misc import load_function
+
+logger = logging.getLogger(__name__)
+
+
+def reset_arg(parser, name, **kwargs):
+    """
+    Reset the default value of a Megatron argument.
+    :param parser: The argument parser.
+    :param name: The name of the argument to reset.
+    :param default: The new default value.
+    """
+    for action in parser._actions:
+        if name in action.option_strings:
+            if "default" in kwargs:
+                action.default = kwargs["default"]
+            break
+    else:
+        parser.add_argument(name, **kwargs)
+
+
+def get_miles_extra_args_provider(add_custom_arguments=None):
+    def add_miles_arguments(parser):
+        # Ray
+        def add_cluster_arguments(parser):
+            parser.add_argument("--actor-num-nodes", type=int, default=1, help="Number of nodes for training actor")
+            parser.add_argument(
+                "--actor-num-gpus-per-node", type=int, default=8, help="Number of gpus per node for training actor"
+            )
+            parser.add_argument(
+                "--critic-num-nodes", type=int, default=None, help="Number of nodes for training actor"
+            )
+            parser.add_argument(
+                "--critic-num-gpus-per-node", type=int, default=None, help="Number of gpus per node for training actor"
+            )
+
+            parser.add_argument(
+                "--rollout-num-gpus",
+                type=int,
+                default=None,
+                help=(
+                    "Number of GPUs for inference. Note that when using --colocate, "
+                    "i.e. the training and the inference engines are on the same gpus, this param will be ignored and will be set as "
+                    "actor_num_gpus_per_node * actor_num_nodes."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-num-gpus-per-engine",
+                type=int,
+                default=1,
+                help="Number of GPUs per inference engine, just like the tp_size in sglang.",
+            )
+            parser.add_argument(
+                "--num-gpus-per-node",
+                type=int,
+                default=8,
+                help=(
+                    "Number of gpus per node for rollout."
+                    "Notice: If you are going to use less than 8 gpus per node under colocate mode, you should set this number."
+                ),
+            )
+            parser.add_argument(
+                "--colocate",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to colocate the inference engines and the actor. "
+                    "Turning this on will also set --offload to true."
+                ),
+            )
+            parser.add_argument(
+                "--offload",
+                action="store_true",
+                default=False,
+                help=("Equivalent to --offload-train + --offload-rollout. "),
+            )
+            parser.add_argument(
+                "--offload-train",
+                action=argparse.BooleanOptionalAction,
+                help=(
+                    "Whether to offload the training actor to CPU during training. "
+                    "This will always be true when --colocate is set."
+                ),
+            )
+            parser.add_argument(
+                "--offload-rollout",
+                action=argparse.BooleanOptionalAction,
+                help=(
+                    "Whether to offload the rollout generator to CPU during training. "
+                    "This will always be true when --colocate is set."
+                ),
+            )
+
+            parser.add_argument(
+                "--offload-rollout-level",
+                type=str,
+                nargs="+",
+                default=["kv_cache", "weight"],
+                help=(
+                    "Specifies what to offload during rollout when offload-rollout is set. "
+                    "Possible values: 'kv_cache', 'weight'. Default: both 'kv_cache' and 'weight'. "
+                    "Example: --offload-rollout-level kv_cache weight"
+                ),
+            )
+
+            reset_arg(parser, "--distributed-backend", type=str, default="nccl")
+            reset_arg(parser, "--distributed-timeout-minutes", type=int, default=10)
+
+            return parser
+
+        def add_train_arguments(parser):
+            parser.add_argument(
+                "--train-backend",
+                type=str,
+                choices=["megatron", "fsdp"],
+                default="megatron",
+                help="The backend for training.",
+            )
+            parser.add_argument(
+                "--qkv-format",
+                type=str,
+                choices=["thd", "bshd"],
+                default="thd",
+                help="The qkv layout.",
+            )
+            parser.add_argument(
+                "--true-on-policy-mode",
+                action="store_true",
+                default=False,
+                help="Whether to enable true-on-policy mode.",
+            )
+            parser.add_argument(
+                "--recompute-logprobs-via-prefill",
+                action="store_true",
+                default=False,
+                help=(
+                    "Recompute rollout logprobs via SGLang prefill instead of decode kernels. "
+                    "Only needed for models whose prefill and decode paths are not numerically identical."
+                ),
+            )
+            parser.add_argument(
+                "--train-env-vars",
+                type=json.loads,
+                default="{}",
+                help="Extra environment variables for training process, e.g. PyTorch memory management ones.",
+            )
+            parser.add_argument(
+                "--train-memory-margin-bytes",
+                type=int,
+                default=1024**3,
+                help="Add margin for train memory allocation. By default we will reserve 1GB as margin.",
+            )
+            parser.add_argument(
+                "--debug-skip-weight-update",
+                action="store_true",
+                default=False,
+                help=(
+                    "Debug-only: preserve the train/rollout offload-onload schedule, "
+                    "but skip the actual actor-to-rollout weight update."
+                ),
+            )
+            parser.add_argument(
+                "--debug-disable-optimizer",
+                action="store_true",
+                default=False,
+                help=(
+                    "Debug-only: do not initialize the Megatron optimizer or LR scheduler. "
+                    "Training still runs rollout, log-prob forward, and actor forward/backward, "
+                    "but skips optimizer state allocation and optimizer updates."
+                ),
+            )
+            parser.add_argument(
+                "--disable-weights-backuper",
+                action="store_false",
+                dest="enable_weights_backuper",
+                help=(
+                    "Applies to `megatron` training backend only. "
+                    "Disables the system that backups model weights (Actor, Ref, Old Actor) to CPU RAM. "
+                    "Disabling saves significant host memory but prevents features that rely on weight-swapping, such as computing KL-divergence against a reference model. "
+                    "Note: do not set `--ref-load` and `--keep-old-actor` if disable weights backuper."
+                ),
+            )
+            parser.add_argument(
+                "--megatron-to-hf-mode",
+                choices=["raw", "bridge"],
+                default="raw",
+                help="The method to convert megatron weights to hugging face weights for SGLang.",
+            )
+            parser.add_argument(
+                "--extra-high-precision-layers-hf",
+                type=str,
+                nargs="*",
+                default=(),
+                help=("Extra substrings for HF weight names to skip quantization " "(e.g. .kv_b_proj.)."),
+            )
+            parser.add_argument(
+                "--extra-high-precision-layers-megatron",
+                type=str,
+                nargs="*",
+                default=(),
+                help=(
+                    "Extra substrings for Megatron weight names to skip quantization in Megatron-to-HF paths "
+                    "(e.g. .linear_kv_up_proj.)."
+                ),
+            )
+            parser.add_argument(
+                "--custom-model-provider-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a custom model provider function. "
+                    "If set, we will use this function instead of the default model provider. "
+                    "The function should have the signature "
+                    "`def custom_model_provider(pre_process: bool, post_process: bool, vp_stage: int | None = None) -> GPTModel`. "
+                    "Example: 'my_module.my_model_provider'."
+                ),
+            )
+            parser.add_argument(
+                "--recompute-loss-function",
+                action="store_true",
+                help="Whether to enable recompute loss function to save memory during training.",
+            )
+            parser.add_argument(
+                "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
+            )
+            parser.add_argument(
+                "--allgather-cp",
+                action="store_true",
+                default=False,
+            )
+            reset_arg(
+                parser,
+                "--low-memory-resume",
+                action="store_true",
+                default=False,
+                help=(
+                    "Allocate optimizer states on CPU during checkpoint loading to prevent GPU OOM on memory spike. "
+                ),
+            )
+
+            return parser
+
+        # rollout
+        def add_rollout_arguments(parser):
+            parser.add_argument(
+                "--hf-checkpoint",
+                type=str,
+                default=None,
+                help=(
+                    "The huggingface checkpoint of the trained model. "
+                    "This is used to initialize sglang and also provide the tokenizer. "
+                    "Note that, we will always update the parameters in sglang with that of megatron before training, "
+                    "so you only need to provide a huggingface checkpoint that has the same architecture as the model you want to train. "
+                    "It doesn't necessary need to contain the most up-to-date parameters."
+                ),
+            )
+            parser.add_argument(
+                "--model-name",
+                type=str,
+                default=None,
+                help=(
+                    "The name of the model, this is used to convert the megatron weights into huggingface format. "
+                    "If not set, we will use `type(AutoConfig.from_pretrained(args.hf_checkpoint)).__name__.lower()` as model_name. "
+                    "Also, sometimes this will help alleviate the bug that transformers cannot find certain model."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-function-path",
+                type=str,
+                default=(
+                    "miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn"
+                    if enable_experimental_rollout_refactor()
+                    else "miles.rollout.sglang_rollout.generate_rollout"
+                ),
+                help=(
+                    "Path to the rollout generation function. "
+                    "Use this to create your own custom rollout function and set this to its path. "
+                    "The function is called as `fn(args, rollout_id, data_source, evaluation=evaluation)`, "
+                    "so its signature should be "
+                    "`def generate_rollout(args, rollout_id, data_source, evaluation=False) "
+                    "-> RolloutFnTrainOutput | RolloutFnEvalOutput` "
+                    "(see `miles.rollout.sglang_rollout.generate_rollout` for the default impl). "
+                    "Within each output sample, set at least `tokens`, `response_length`, `reward`, "
+                    "and `truncated`."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-temperature",
+                type=float,
+                default=1.0,
+                help="the temperature for the inference engine during rollout.",
+            )
+            parser.add_argument(
+                "--rollout-top-p", type=float, default=1.0, help="the top-p for the inference engine during rollout."
+            )
+            parser.add_argument(
+                "--rollout-top-k", type=int, default=-1, help="the top-k for the inference engine during rollout."
+            )
+            parser.add_argument(
+                "--rollout-max-context-len",
+                type=int,
+                default=None,
+                help=(
+                    "The maximum context size for the inference engine during rollout."
+                    "It should no exceed the `max_position_embeddinds` in Huggingface model's `config.json`"
+                ),
+            )
+            parser.add_argument(
+                "--rollout-max-prompt-len",
+                type=int,
+                default=None,
+                help=(
+                    "The maximum length of the prompt for the inference engine during rollout. "
+                    "If set, we will filter out the long prompts during initialization of the global dataset. "
+                    "This is not recommended if the dataset is large."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-max-response-len",
+                type=int,
+                default=None,
+                help=(
+                    "The maximum length of the response for the inference engine during rollout. "
+                    "It is basically `max_tokens` in sglang."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-skip-special-tokens",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to skip special tokens in the response during rollout. "
+                    "This is useful when you want to use the response as a prompt for the next rollout."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-stop",
+                type=str,
+                nargs="+",
+                default=None,
+                help=(
+                    "The stop words for the inference engine during rollout. "
+                    "It can be a list of strings or a single string. "
+                    "It may be hard to pass special tokens in command line, in that case rollout_stop_token_ids can be used."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-stop-token-ids",
+                type=int,
+                nargs="+",
+                default=None,
+                help=(
+                    "The stop token ids for the inference engine during rollout. "
+                    "It can be a list of integers or a single integer."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-shuffle",
+                action="store_true",
+                default=False,
+                help=("Whether to shuffle the prompts during rollout."),
+            )
+            parser.add_argument(
+                "--rollout-seed",
+                type=int,
+                default=42,
+                help=(
+                    "The seed for the random number generator during rollout. "
+                    "This is used to shuffle the prompts and also for the random sampling of the prompts."
+                ),
+            )
+
+            # sampling
+            parser.add_argument(
+                "--over-sampling-batch-size",
+                type=int,
+                default=None,
+                help=(
+                    "This defines the granularity of the sampling batch in the rollout function. "
+                    "When the number of available samples falls below the target, a sampling "
+                    "operation of size over_sampling_batch_size will be triggered."
+                    "Regardless of whether partial rollout is used or filters are applied, "
+                    "the sampling granularity is always determined by this value. "
+                    "If this value is None, rollout_batch_size will be used as the default over_sampling_batch_size."
+                ),
+            )
+            parser.add_argument(
+                "--dynamic-sampling-filter-path",
+                type=str,
+                default=None,
+                help=(
+                    "This is the filter function for dynamic sampling. "
+                    "It should be able to judge whether the result of a prompt should be selected or not."
+                    "We will do dynamic filter for sampling as in DAPO. e.g. not all correct or all wrong samples."
+                    "You could use `miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std` as an example."
+                ),
+            )
+            parser.add_argument(
+                "--dynamic-sampling-resample-same-prompt-max-times",
+                type=int,
+                default=0,
+                help=(
+                    "Retry the same prompt group this many extra times when the dynamic sampling filter rejects it "
+                    "with a retryable reason such as solve_none or solve_all."
+                ),
+            )
+            parser.add_argument(
+                "--stop-on-no-grad-threshold",
+                type=float,
+                default=None,
+                help=(
+                    "If grpo_metrics/no_grad stays above this threshold for multiple consecutive rollouts, "
+                    "stop training early before the actor update."
+                ),
+            )
+            parser.add_argument(
+                "--stop-on-no-grad-patience",
+                type=int,
+                default=3,
+                help="Number of consecutive rollouts allowed above --stop-on-no-grad-threshold before stopping.",
+            )
+
+            # partial rollout
+            parser.add_argument(
+                "--partial-rollout",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to use partial rollout. "
+                    "If set, the unfinished samples during dynamic sampling will be recycled back to data buffer. "
+                    "This is useful for long responses."
+                ),
+            )
+            parser.add_argument(
+                "--mask-offpolicy-in-partial-rollout",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to mask previous generation in partial rollout. "
+                    "If set, only on-policy generated tokens will be used in training"
+                ),
+            )
+            parser.add_argument(
+                "--max-weight-staleness",
+                type=int,
+                default=None,
+                help=(
+                    "Maximum allowed gap between a group's oldest weight version and the current "
+                    "engine weight version. Groups exceeding this threshold are recycled back to "
+                    "the data buffer instead of being sent to training. Only effective in fully "
+                    "async mode. None (default) disables staleness filtering."
+                ),
+            )
+            parser.add_argument(
+                "--custom-generate-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Only substitue the `def generate(args, sample, sampling_params)` function within the example rollout function. "
+                    "This should be useful if you need to implement some special rollout logic, e.g. multi-turn, function calling."
+                ),
+            )
+            parser.add_argument(
+                "--custom-rollout-log-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "The custom function for logging rollout data. The signature of the functions is: "
+                    "def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool. "
+                    "The return value indicates whether to skip the default logging. "
+                ),
+            )
+            parser.add_argument(
+                "--custom-eval-rollout-log-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "The custom function for logging eval rollout data. "
+                    "def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool. "
+                    "The return value indicates whether to skip the default logging. "
+                ),
+            )
+
+            parser.add_argument(
+                "--buffer-filter-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to the buffer filter function. "
+                    "It should be able to select the samples in the buffer. "
+                    "The function should take list[list[Sample]] and return list[list[Sample]]."
+                ),
+            )
+            # update weight
+            parser.add_argument(
+                "--update-weight-buffer-size",
+                type=int,
+                default=512 * 1024**2,
+                help=(
+                    "buffer size for update weight, in bytes. "
+                    "This is used for updating weights by chunk and should be useful for MoE models."
+                ),
+            )
+            parser.add_argument(
+                "--update-weights-interval",
+                type=int,
+                default=1,
+                help="Interval for updating the weights",
+            )
+            parser.add_argument(
+                "--pause-generation-mode",
+                type=str,
+                choices=["abort", "retract", "in_place"],
+                default="retract",
+                help=(
+                    "How SGLang pauses in-flight requests during weight updates. "
+                    "'abort' immediately terminates all requests (previous default). "
+                    "'retract' moves running requests back to the waiting queue and "
+                    "recomputes KV cache after update. "
+                    "'in_place' freezes requests and resumes with existing KV cache."
+                ),
+            )
+            parser.add_argument(
+                "--keep-old-actor",
+                action="store_true",
+                help="Whether to keep the rollout model on training process",
+            )
+
+            parser.add_argument(
+                "--rollout-data-postprocess-path",
+                type=str,
+                default=None,
+                help=(
+                    "The called after we have all the rollout data including log_probs. "
+                    "It may be helpful for updating loss mask."
+                ),
+            )
+            parser.add_argument(
+                "--pin-rollout-manager-to-head",
+                action="store_true",
+                default=False,
+                help=(
+                    "Pin the RolloutManager (and its co-located router process) to the Ray head node. "
+                    "Useful in K8s where the head pod has a stable Service address so that "
+                    "external agent environments can reliably reach the router."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-external",
+                action="store_true",
+                default=False,
+                help="Use external SGLang instances instead of launching them inside the framework.",
+            )
+            parser.add_argument(
+                "--rollout-external-engine-addrs",
+                type=str,
+                default=None,
+                nargs="+",
+                help="Address and ports of the external engines.",
+            )
+            parser.add_argument(
+                "--update-weight-transfer-mode",
+                choices=["broadcast", "p2p"],
+                default="broadcast",
+                help="The method to transfer weights to remote rollout engines during update weight.",
+            )
+            parser.add_argument(
+                "--p2p-transfer-num-workers",
+                type=int,
+                default=4,
+                help="Number of thread pool workers for P2P weight transfer.",
+            )
+            parser.add_argument(
+                "--p2p-transfer-timeout",
+                type=float,
+                default=30.0,
+                help="Timeout in seconds for each P2P transfer operation.",
+            )
+            return parser
+
+        def add_fault_tolerance_arguments(parser):
+            parser.add_argument(
+                "--use-fault-tolerance",
+                action="store_true",
+                default=False,
+                help="Whether to enable the fault tolerance function during rollout.",
+            )
+            parser.add_argument(
+                "--rollout-health-check-interval",
+                type=float,
+                default=30.0,
+                help="Interval in seconds between rollout engine /health_generate checks during generate/eval.",
+            )
+            parser.add_argument(
+                "--rollout-health-check-timeout",
+                type=float,
+                default=30.0,
+                help="Timeout in seconds to wait for a rollout engine /health_generate response before killing it.",
+            )
+            parser.add_argument(
+                "--rollout-health-check-first-wait",
+                type=float,
+                default=0,
+                help="Initial grace period (in seconds) before starting health checks. This allows time for model compilation and initialization. Increase this value significantly when using deepgemm.",
+            )
+            return parser
+
+        # data
+        def add_data_arguments(parser):
+            # dataset
+            # TODO: maybe add an num_epoch and calculate the num_rollout from buffer
+            parser.add_argument(
+                "--num-rollout",
+                type=int,
+                default=None,
+                help="Number of rollout steps. If not set, we will calculate the number of rollout steps from the dataset size.",
+            )
+            parser.add_argument(
+                "--num-epoch",
+                type=int,
+                default=None,
+                help=(
+                    "Number of epochs for the training. "
+                    "This is used to calculate the number of rollout steps from the dataset size. "
+                    "If set, we will calculate the number of rollout steps as `num_rollout = num_epoch * dataset_size // rollout_batch_size`."
+                    "If both `--num-epoch` and `--num-rollout` are set, `--num-epoch` will be ignored."
+                ),
+            )
+
+            parser.add_argument(
+                "--disable-rollout-global-dataset",
+                action="store_false",
+                dest="rollout_global_dataset",
+                help=(
+                    "Disable the global dataset for rollout. By default, Miles loads `--prompt-data` into a global dataset and samples from it for rollout. "
+                    "Setting this flag turns off this behavior, Use this flag only when providing a custom `--rollout-function-path` (and usually a custom `--data-source-path`) that handles data loading independently."
+                ),
+            )
+
+            parser.add_argument(
+                "--data-source-path",
+                type=str,
+                default="miles.rollout.data_source.RolloutDataSourceWithBuffer",
+                help="The data source class for rollout data.",
+            )
+            parser.add_argument(
+                "--prompt-data",
+                type=str,
+                default=None,
+                nargs="+",
+                help=(
+                    "The path to the prompt data. "
+                    "Currently we only support jsonl format, and each line should contains --input-key and --label-key, "
+                    "which will be used as the prompt and the label respectively."
+                    "If you want to use a custom template, you can set --apply-chat-template to true, in that case, "
+                    "the input should be the same structure as an openai message, e.g. [{'role': 'user', 'content': 'blabla'}]. "
+                ),
+            )
+            parser.add_argument("--apply-chat-template", action="store_true", default=False)
+            # Temporarily be JSON-serialized str, will be a real dict after using Omegaconf
+            parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default="{}")
+            parser.add_argument(
+                "--chat-template-path",
+                type=str,
+                default=None,
+                help="Path to an explicit custom Jinja chat template file (.jinja). "
+                "Sets tokenizer.chat_template when loading via load_tokenizer, "
+                "and also sets --sglang-chat-template so the sglang server uses the same template. "
+                "For Miles-maintained fixed templates, leave this unset and pass "
+                "--tito-model plus --tito-allowed-append-roles so Miles can auto-resolve "
+                "the registered template. The literal value 'autofix' is kept only as a "
+                "deprecated compatibility alias for that auto-resolve path. "
+                "The path must be accessible on all Ray worker nodes "
+                "(e.g. a path inside the miles repo, or a shared filesystem like NFS).",
+            )
+            parser.add_argument("--input-key", type=str, default="input", help="JSON dataset key")
+            parser.add_argument("--label-key", type=str, default=None, help="JSON dataset key")
+            parser.add_argument(
+                "--multimodal-keys",
+                type=json.loads,
+                default=None,
+                help=(
+                    'JSON string for multimodal data mapping media types to data keys. Example: \'{"image": "image_file"}\''
+                ),
+            )
+            parser.add_argument("--metadata-key", type=str, default="metadata", help="JSON dataset key")
+            parser.add_argument(
+                "--tool-key",
+                type=str,
+                default="tools",
+                help=(
+                    "When need to add tools during apply_chat_template, you should provide the key for the tools in the prompt dataset."
+                ),
+            )
+
+            parser.add_argument(
+                "--start-rollout-id",
+                type=int,
+                default=None,
+                help=(
+                    "The starting rollout step, if not set, will try to load the step from --load when doing continue training, "
+                    "otherwise will be set to 0, meaning training from start."
+                ),
+            )
+
+            # batch sizes
+            parser.add_argument(
+                "--rollout-batch-size",
+                type=int,
+                required=True,
+                help=(
+                    "The number of prompts in each rollout step. "
+                    "The total data returned should be rollout_batch_size * n_samples_per_prompt. "
+                ),
+            )
+            parser.add_argument(
+                "--n-samples-per-prompt", type=int, default=1, help="Number of responses for each prompt in generation"
+            )
+
+            # gbs of the training, note that the gbs is of sample, not of prompts,
+            # so if you hope to train 1 step for each rollout, the global_bach_size should be set as
+            # `rollout_batch_size * n_samples_per_prompt`.
+            reset_arg(parser, "--global-batch-size", type=int, default=None)
+            parser.add_argument(
+                "--num-steps-per-rollout",
+                type=int,
+                default=None,
+                help=(
+                    "Number of steps per rollout, e.g. It is equivalent to setting gbs as "
+                    "`rollout_batch_size * n_samples_per_prompt // num_steps_per_rollout`."
+                ),
+            )
+            # mbs for the training, will be ignored if `use_dynamic_batch_size` is set.
+            reset_arg(parser, "--micro-batch-size", type=int, default=1)
+            parser.add_argument(
+                "--balance-data",
+                action="store_true",
+                default=False,
+                help=(
+                    "Repartition each rollout batch so each data-parallel rank gets a similar total token count via Karmarkar-Karp method. "
+                    "It may be beneficial for training speed but changes per-rank sample grouping and adds a small CPU scheduling overhead."
+                ),
+            )
+
+            parser.add_argument(
+                "--use-dynamic-batch-size",
+                action="store_true",
+                default=False,
+                help=(
+                    "Because the sample length varies, to maximize the GPU utilization, "
+                    "we will use the dynamic batch size to adjust the micro batch size according to the maximum number of tokens each gpu can run. "
+                    "For example, if we have 3 samples, with the length of 100, 200, and 300, and the max_tokens_per_gpu is 300, when enabling "
+                    "dynamic batch size, miles will make 2 micro batches, i.e. [100, 200], [300]."
+                ),
+            )
+            parser.add_argument(
+                "--max-tokens-per-gpu",
+                type=int,
+                default=None,
+                help=(
+                    "The maximum number of tokens per GPU for dynamic batch size. "
+                    "Note that when enabling context parallel (CP), the max tokens per gpu should be around "
+                    "`max_response_len // cp_size` instead of `max_response_len`."
+                ),
+            )
+            parser.add_argument(
+                "--log-probs-max-tokens-per-gpu",
+                type=int,
+                default=None,
+                help=(
+                    "The maximum number of tokens per GPU for calculating log probs. "
+                    "This is used to calculate the log probs of the responses during rollout, "
+                    "and should be set to a larger value than `max_tokens_per_gpu` if you want better performance. "
+                ),
+            )
+            return parser
+
+        def add_eval_arguments(parser):
+            parser.add_argument(
+                "--eval-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to the eval generation function."
+                    "If not set, we will use rollout_function_path as the default. "
+                ),
+            )
+
+            # change the default value of eval_interval from Megatron to None
+            reset_arg(parser, "--eval-interval", type=int, default=None)
+
+            parser.add_argument(
+                "--eval-prompt-data",
+                type=str,
+                default=None,
+                nargs="+",
+                help=(
+                    "Path to the evaluation prompt data, "
+                    "should first input the name of the eval dataset and then the path, e.g. "
+                    "aime /path/to/aime.jsonl"
+                ),
+            )
+            parser.add_argument(
+                "--eval-config",
+                type=str,
+                default=None,
+                help=(
+                    "Path to an OmegaConf YAML/JSON file describing evaluation datasets. "
+                    "When provided, this overrides --eval-prompt-data."
+                ),
+            )
+            parser.add_argument(
+                "--skip-eval-before-train",
+                action="store_true",
+                default=False,
+                help="Whether to skip evaluation before training.",
+            )
+
+            # The following keys are used to override the rollout version during eval.
+            parser.add_argument("--eval-input-key", type=str, default=None, help="JSON dataset key")
+            parser.add_argument("--eval-label-key", type=str, default=None, help="JSON dataset key")
+            parser.add_argument("--eval-tool-key", type=str, default=None, help="JSON dataset key")
+            parser.add_argument(
+                "--n-samples-per-eval-prompt",
+                type=int,
+                default=1,
+                help="number of responses for each prompt in generation",
+            )
+            parser.add_argument("--eval-temperature", type=float, default=None)
+            parser.add_argument("--eval-top-p", type=float, default=None)
+            parser.add_argument("--eval-top-k", type=int, default=None)
+            parser.add_argument("--eval-max-response-len", type=int, default=None)
+            parser.add_argument("--eval-max-prompt-len", type=int, default=None)
+            parser.add_argument("--eval-min-new-tokens", type=int, default=None)
+            parser.add_argument("--eval-max-context-len", type=int, default=None)
+
+            return parser
+
+        def add_algo_arguments(parser):
+            parser.add_argument(
+                "--ref-load",
+                type=str,
+                default=None,
+                help=(
+                    "The checkpoint for reference model. "
+                    "When --load is not set, this will be used as the initial checkpoint for training. "
+                ),
+            )
+            parser.add_argument(
+                "--ref-ckpt-step", type=int, default=None, help="The checkpoint step for reference model. "
+            )
+            reset_arg(parser, "--load", type=str, default=None)
+            reset_arg(parser, "--save", type=str, default=None)
+            reset_arg(parser, "--save-interval", type=int, default=None)
+            reset_arg(parser, "--async-save", action="store_true")
+            reset_arg(
+                parser,
+                "--no-save-optim",
+                action="store_true",
+                default=False,
+                help=(
+                    "If set, do not save the optimizer state when saving checkpoints. "
+                    "This reduces checkpoint size but disables training resumption from the saved checkpoint."
+                ),
+            )
+            parser.add_argument(
+                "--save-hf",
+                type=str,
+                default=None,
+                help=(
+                    "Path to save the model in HuggingFace format when using Megatron backend. "
+                    "The model will be saved to `save_hf.format(rollout_id=rollout_id)`. "
+                    "Include a `{rollout_id}` placeholder (e.g. `.../hf/iter_{rollout_id:07d}`) to keep "
+                    "one directory per export; without it the same path is overwritten every time. "
+                ),
+            )
+            parser.add_argument(
+                "--save-hf-interval",
+                type=int,
+                default=None,
+                help=(
+                    "Export the HuggingFace-format model (--save-hf) every N rollouts instead of at "
+                    "every checkpoint save. Must be a multiple of --save-interval, because the export "
+                    "can only run when a checkpoint save is triggered; the final rollout always exports. "
+                    "Useful for keeping frequent torch_dist checkpoints (rotated by "
+                    "--save-retain-interval) while archiving HF snapshots long-term."
+                ),
+            )
+            reset_arg(parser, "--seed", type=int, default=1234)
+            reset_arg(parser, "--clip-grad", type=float, default=1.0)
+            reset_arg(parser, "--calculate-per-token-loss", action="store_true")
+            reset_arg(parser, "--lr", type=float, default=1e-6)
+
+            parser.add_argument("--num-critic-only-steps", type=int, default=0, help="Number of critic only steps")
+            parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
+            parser.add_argument(
+                "--critic-finetune-load-value-head",
+                action="store_true",
+                default=False,
+                help="When finetune-loading the critic from a real critic checkpoint "
+                "(with a trained [1, hidden] value head), load output_layer instead of "
+                "keeping random init. Leave off when critic initializes from a policy "
+                "checkpoint whose output_layer is the LM head.",
+            )
+            parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
+            parser.add_argument("--critic-lr", type=float, default=None, help="The lr for critic model")
+            parser.add_argument(
+                "--critic-lr-warmup-iters",
+                type=int,
+                default=0,
+                help="number of iterations to linearly warmup for critic model.",
+            )
+
+            parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
+            parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
+            parser.add_argument(
+                "--vapo-lambda-alpha",
+                type=float,
+                default=None,
+                help="VAPO length-adaptive decoupled GAE: advantages use per-sample "
+                "lambda = 1 - 1/(alpha * response_len) while returns use lambda = 1 "
+                "(unbiased critic target). Requires gamma == 1. None disables.",
+            )
+            parser.add_argument(
+                "--positive-lm-loss-coef",
+                type=float,
+                default=0.0,
+                help="VAPO positive-example LM loss: add coef * NLL on tokens of "
+                "samples with returns > 0.5 (correct answers). 0 disables.",
+            )
+            parser.add_argument(
+                "--no-positive-lm-difficulty-weight",
+                action="store_false",
+                dest="positive_lm_difficulty_weight",
+                default=True,
+                help="Disable weighting positive-example LM loss NLL by "
+                "(1 - group_pass_rate). Enabled by default: all-solved groups get 0, "
+                "rare successes on hard prompts get the highest weight. "
+                "Requires binary 0/1 raw rewards.",
+            )
+            parser.add_argument(
+                "--eps-clip-c",
+                type=float,
+                default=None,
+                help="lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729",
+            )
+            parser.add_argument("--value-clip", type=float, default=0.2, help="the clip for value loss")
+            parser.add_argument(
+                "--kl-coef",
+                type=float,
+                default=0.00,
+                help="KL penalty coefficient for reward shaping. This is applied to the reward signal before advantage calculation.",
+            )
+            parser.add_argument(
+                "--loss-type",
+                type=str,
+                choices=["policy_loss", "sft_loss", "custom_loss"],
+                default="policy_loss",
+                help=(
+                    "Choose loss type, currently support ppo policy_loss or sft_loss, "
+                    "if custom_loss is set, we will use the function path from `--custom-loss-function-path`."
+                ),
+            )
+            parser.add_argument(
+                "--custom-loss-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to the custom loss function, if the loss_type is `custom_loss`, "
+                    "we will use this function to calculate the loss. "
+                ),
+            )
+            parser.add_argument(
+                "--kl-loss-type",
+                type=str,
+                choices=["k1", "k2", "k3", "low_var_kl"],
+                default="k1",
+                help="Choose KL loss type: kl, k2, k3, low_var_kl",
+            )
+            parser.add_argument(
+                "--advantage-estimator",
+                type=str,
+                choices=[
+                    "grpo",
+                    "gspo",
+                    "reinforce_plus_plus",
+                    "reinforce_plus_plus_baseline",
+                    "ppo",
+                    "on_policy_distillation",
+                ],
+                default="grpo",
+            )
+            parser.add_argument(
+                "--disable-compute-advantages-and-returns",
+                action="store_false",
+                dest="compute_advantages_and_returns",
+                help=(
+                    "Whether to disable computing advantages and returns. "
+                    "If set, we will not compute the advantages and returns, "
+                    "This is useful for sft or custom loss function."
+                ),
+            )
+            parser.add_argument(
+                "--use-kl-loss", action="store_true", default=False, help="whether to use KL loss from GRPO"
+            )
+            parser.add_argument(
+                "--kl-loss-coef",
+                type=float,
+                default=0.0,
+                help="KL penalty coefficient for the loss function. This is added to the final PPO loss.",
+            )
+            parser.add_argument(
+                "--use-unbiased-kl",
+                action="store_true",
+                default=False,
+                help="Whether to enable unbiased KL estimation.",
+            )
+            parser.add_argument(
+                "--ref-update-interval",
+                type=int,
+                default=None,
+                help="Interval (in rollout steps) to update ref model from actor. If None, ref model is not updated.",
+            )
+            parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
+            parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
+            parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
+            parser.add_argument("--normalize-advantages", action="store_true", default=False)
+            parser.add_argument(
+                "--disable-grpo-std-normalization",
+                action="store_false",
+                dest="grpo_std_normalization",
+                help="from Dr.GRPO https://arxiv.org/pdf/2503.20783",
+            )
+            parser.add_argument(
+                "--disable-rewards-normalization",
+                action="store_false",
+                dest="rewards_normalization",
+                help="Disable rewards normalization",
+            )
+            parser.add_argument(
+                "--overlong-filtering",
+                action="store_true",
+                default=False,
+                help=(
+                    "DAPO Overlong Filtering: zero out the loss mask of truncated (length-capped) "
+                    "samples so their tokens contribute no policy gradient. Removes the reward "
+                    "noise from penalizing a possibly-correct long CoT that was merely cut off. "
+                    "See https://arxiv.org/abs/2503.14476 ."
+                ),
+            )
+            parser.add_argument(
+                "--overlong-buffer-len",
+                type=int,
+                default=0,
+                help=(
+                    "DAPO Soft Overlong Punishment buffer length (L_cache). When > 0, a response "
+                    "whose length exceeds (rollout_max_response_len - overlong_buffer_len) gets a "
+                    "length penalty that grows linearly from 0 to -overlong_penalty_factor at the "
+                    "max response length. The penalty is added to the task reward before advantage "
+                    "normalization. 0 disables soft overlong punishment."
+                ),
+            )
+            parser.add_argument(
+                "--overlong-penalty-factor",
+                type=float,
+                default=1.0,
+                help="DAPO Soft Overlong Punishment scale applied within the buffer band (see --overlong-buffer-len).",
+            )
+            parser.add_argument(
+                "--critic-exclude-overlong-penalty",
+                action="store_true",
+                default=False,
+                help=(
+                    "PPO/VAPO only: regress the critic's value loss against returns computed from "
+                    "rewards WITHOUT the soft overlong punishment (other reward shaping, e.g. the "
+                    "length reward, is kept). The actor's advantages/returns still use the fully "
+                    "shaped reward, with the same critic providing the baseline V."
+                ),
+            )
+            parser.add_argument(
+                "--critic-exclude-length-reward",
+                action="store_true",
+                default=False,
+                help=(
+                    "PPO/VAPO only: regress the critic's value loss against returns computed from "
+                    "rewards WITHOUT the in-group relative length reward (see "
+                    "--length-reward-weight). Independent of --critic-exclude-overlong-penalty; "
+                    "with both set, the critic target is the raw task reward. The actor's "
+                    "advantages/returns still use the fully shaped reward, with the same critic "
+                    "providing the baseline V. No-op when no length reward is applied."
+                ),
+            )
+            parser.add_argument(
+                "--olp-analytic-inject",
+                action="store_true",
+                default=False,
+                help=(
+                    "cleancritic 2.0 (PPO/VAPO only): take the DAPO soft overlong punishment out of "
+                    "the learning channel entirely — rewards, GAE and the critic's regression "
+                    "target all stay clean, as if OLP were off — and instead inject it analytically "
+                    "into the advantages after GAE: token t of sample i gets "
+                    "penalty_i * lambda_i^(L_i-1-t) with lambda_i = clamp(1 - 1/(alpha*L_i), min=0) "
+                    "(see --olp-inject-alpha). Requires --overlong-buffer-len > 0; mutually "
+                    "exclusive with --critic-exclude-overlong-penalty (this switch is its superset)."
+                ),
+            )
+            parser.add_argument(
+                "--olp-inject-alpha",
+                type=float,
+                default=0.1,
+                help=(
+                    "Decay radius alpha for --olp-analytic-inject, parametrized like "
+                    "--vapo-lambda-alpha: lambda = clamp(1 - 1/(alpha*L), min=0) with L the "
+                    "response length, so a token at distance d from the end gets weight lambda^d. "
+                    "With 0.1 only roughly the last tenth of the response feels the penalty."
+                ),
+            )
+            parser.add_argument(
+                "--group-center-inject",
+                action="store_true",
+                default=False,
+                help=(
+                    "Arm #16 (PPO/VAPO only): leave-one-out group centering injected into the "
+                    "actor's advantages after GAE. For each group g (the n_samples_per_prompt "
+                    "samples of one prompt) compute the terminal scalar a_j = raw_reward_j - V_j "
+                    "(critic value at the sample's last loss-mask token) and inject "
+                    "P_i = -sum_{j in g, j != i}(a_j)/(n_g - 1) into sample i's advantages with "
+                    "the same length-adaptive decay lambda_i = clamp(1 - 1/(alpha*L_i), min=0) as "
+                    "the VAPO decoupled GAE (alpha = --vapo-lambda-alpha, required; no separate "
+                    "alpha hyperparameter). Equivalent to subtracting the leave-one-out group "
+                    "baseline from the terminal reward and re-running GAE — but returns are "
+                    "untouched: the critic keeps learning the uncentered return. a_j uses "
+                    "raw_reward (pure task reward, no OLP/length shaping), so this composes with "
+                    "--olp-analytic-inject (the two linear injections simply add up) and stays "
+                    "semantically identical across OLP-in-reward baseline arms."
+                ),
+            )
+            parser.add_argument(
+                "--length-reward-weight",
+                type=float,
+                default=0.0,
+                help=(
+                    "Kimi k1.5-style in-group relative length reward, correct-branch only. When > 0, "
+                    "within each GRPO group the CORRECT samples (raw reward > 0.5) get an extra reward "
+                    "w * (0.5 - (len - min_len) / (max_len - min_len)) where min/max are taken over the "
+                    "correct subset only: the shortest correct answer gets +0.5*w, the longest -0.5*w. "
+                    "Incorrect samples are untouched (no early-give-up incentive). Groups with < 2 "
+                    "correct samples are skipped. Added to the task reward before advantage "
+                    "normalization, alongside the DAPO soft overlong punishment. 0 disables. "
+                    "See Kimi k1.5 (https://arxiv.org/abs/2501.12599) sec 2.3.3."
+                ),
+            )
+            parser.add_argument(
+                "--length-reward-min-spread",
+                type=int,
+                default=0,
+                help=(
+                    "Minimum in-group length spread (max_len - min_len over the correct subset, in "
+                    "tokens) required to apply --length-reward-weight. Groups whose correct answers "
+                    "differ by less than this get no length reward, avoiding amplifying tiny length "
+                    "differences into full +/-0.5*w reward swings. 0 disables the guard."
+                ),
+            )
+            parser.add_argument(
+                "--length-reward-budget-floor",
+                type=int,
+                default=0,
+                help=(
+                    "Length budget floor (in tokens) for --length-reward-weight. Groups whose "
+                    "correct answers are ALL shorter than this get no length reward, so the "
+                    "compression pressure self-terminates once responses are short enough, guarding "
+                    "against over-compression (ACOER pathway-2). 0 disables the guard."
+                ),
+            )
+            parser.add_argument(
+                "--use-rollout-entropy",
+                action=argparse.BooleanOptionalAction,
+                default=True,
+                help=(
+                    "Whether to calculate the entropy when calculating the logprobs from actor and reference model. "
+                    "Logged as rollout/entropy (entropy collapse diagnostic); also useful for doing special loss mask. "
+                    "Default on; disable with --no-use-rollout-entropy."
+                ),
+            )
+            parser.add_argument(
+                "--get-mismatch-metrics",
+                action="store_true",
+                default=False,
+                help="Whether to calculate the mismatch metrics.",
+            )
+            parser.add_argument(
+                "--reset-optimizer-states",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to reset optimizer states after each rollout. "
+                    "If enabled, the optimizer's history will be cleared at the end of each rollout, which can sometimes help with training stability or fulfill specific experiment requirements."
+                ),
+            )
+            parser.add_argument(
+                "--use-rollout-logprobs",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to use the rollout logprobs when calculating the importance sampling ratios. "
+                    "If not set, we will use the logprobs from the actor model."
+                ),
+            )
+            parser.add_argument(
+                "--monitor-logprob-diff",
+                action="store_true",
+                default=False,
+                help=(
+                    "When --use-rollout-logprobs is set, still run an extra Megatron forward pass "
+                    "to compute log_probs and report the true train_rollout_logprob_abs_diff. "
+                    "This adds compute overhead but enables monitoring train-rollout consistency."
+                ),
+            )
+            # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
+            parser.add_argument(
+                "--use-tis",
+                action="store_true",
+                default=False,
+                help="Enable TIS from https://fengyao.notion.site/off-policy-rl#279721e3f6c48092bbe2fcfe0e9c6b33.",
+            )
+            parser.add_argument(
+                "--tis-clip",
+                type=float,
+                default=2.0,
+                help="Clipping threshold C for importance sampling ratios to control variance.",
+            )
+            parser.add_argument(
+                "--tis-clip-low",
+                type=float,
+                default=0,
+                help="Lower bound clipping threshold C for importance sampling ratios to control variance.",
+            )
+            parser.add_argument(
+                "--custom-tis-function-path",
+                type=str,
+                default=None,
+                help="Path to the custom TIS/RS function (e.g., examples/train_infer_mismatch_helper/mis.py:compute_mis_weights_with_cp).",
+            )
+            parser.add_argument(
+                "--custom-pg-loss-reducer-function-path",
+                type=str,
+                default=None,
+                help="Path to a custom reducer function for pg_loss only. When set, pg_loss will use this custom reducer while other metrics (pg_clipfrac, ppo_kl, entropy_loss, etc.) still use the default sum_of_sample_mean. (e.g., examples/Dr.GRPO/custom_reducer.py:get_pg_loss_reducer).",
+            )
+
+            parser.add_argument(
+                "--use-routing-replay",
+                action="store_true",
+                default=False,
+                help="The routing replay technique from https://arxiv.org/abs/2507.18071",
+            )
+            parser.add_argument(
+                "--use-rollout-routing-replay",
+                action="store_true",
+                default=False,
+                help="The rollout routing replay technique from https://arxiv.org/abs/2510.11370",
+            )
+            parser.add_argument(
+                "--use-opsm",
+                action="store_true",
+                default=False,
+                help="Whether to enable Off-Policy Sequence Masking (OPSM).",
+            )
+            parser.add_argument(
+                "--opsm-delta",
+                type=float,
+                default=1e-4,
+                help="The threshold for Off-Policy Sequence Masking (OPSM).",
+            )
+            return parser
+
+        def add_lora_arguments(parser):
+            """Add LoRA-related arguments for Megatron backend."""
+            parser.add_argument(
+                "--lora-rank",
+                type=int,
+                default=0,
+                help="LoRA rank. Set to 0 to disable LoRA (default: 0)",
+            )
+            parser.add_argument(
+                "--lora-alpha",
+                type=int,
+                default=16,
+                help="LoRA alpha for scaling (default: 16)",
+            )
+            parser.add_argument(
+                "--lora-dropout",
+                type=float,
+                default=0.0,
+                help="LoRA dropout rate (default: 0.0)",
+            )
+            parser.add_argument(
+                "--lora-type",
+                type=str,
+                default="lora",
+                choices=["lora", "canonical_lora"],
+                help="LoRA variant to use: 'lora' (standard) or 'canonical_lora' (split Q/K/V) (default: lora)",
+            )
+            parser.add_argument(
+                "--target-modules",
+                type=str,
+                default=None,
+                help="Target modules for LoRA. Use 'all-linear' or comma-separated module names "
+                "(e.g., 'q_proj,k_proj,v_proj,o_proj' for HF naming or 'linear_qkv,linear_proj' for Megatron naming)",
+            )
+            parser.add_argument(
+                "--exclude-modules",
+                type=str,
+                default=None,
+                help="Modules to exclude from LoRA (comma-separated)",
+            )
+            parser.add_argument(
+                "--lora-adapter-path",
+                type=str,
+                default=None,
+                help="Path to load pre-trained LoRA adapter weights (default: None)",
+            )
+            parser.add_argument(
+                "--lora-sync-from-tensor",
+                action="store_true",
+                default=False,
+                help="Sync LoRA weights via tensor instead of file (more efficient)",
+            )
+            return parser
+
+        def add_router_arguments(parser):
+            parser.add_argument(
+                "--use-miles-router",
+                action="store_true",
+                default=False,
+                help="Whether to use MilesRouter for text-based routing instead of SGLang token-based routing",
+            )
+            parser.add_argument(
+                "--miles-router-middleware-paths",
+                type=str,
+                nargs="+",
+                default="",
+            )
+            parser.add_argument(
+                "--miles-router-timeout",
+                type=float,
+                default=None,
+                help="Timeout for MilesRouter HTTP requests in seconds.",
+            )
+            parser.add_argument(
+                "--miles-router-max-connections",
+                type=int,
+                default=None,
+                help="Max connections for MilesRouter HTTP client.",
+            )
+            parser.add_argument(
+                "--miles-router-health-check-failure-threshold",
+                type=int,
+                default=3,
+                help="Number of consecutive failures before marking a worker as unhealthy.",
+            )
+            RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
+            return parser
+
+        # wandb
+        def add_wandb_arguments(parser):
+            # wandb parameters
+            parser.add_argument("--use-wandb", action="store_true", default=False)
+            parser.add_argument(
+                "--wandb-mode",
+                type=str,
+                default=None,
+                choices=["online", "offline", "disabled"],
+                help="W&B mode: online (default), offline (local only), or disabled. Overrides WANDB_MODE env var.",
+            )
+            parser.add_argument(
+                "--wandb-dir",
+                type=str,
+                default=None,
+                help="Directory to store wandb logs. Default is ./wandb in current directory.",
+            )
+            parser.add_argument("--wandb-key", type=str, default=None)
+            parser.add_argument("--wandb-host", type=str, default=None)
+            parser.add_argument("--wandb-team", type=str, default=None)
+            parser.add_argument("--wandb-group", type=str, default=None)
+            reset_arg(parser, "--wandb-project", type=str, default=None)
+            parser.add_argument(
+                "--disable-wandb-random-suffix",
+                action="store_false",
+                dest="wandb_random_suffix",
+                default=True,
+                help=(
+                    "Whether to add a random suffix to the wandb run name. "
+                    "By default, we will add a random 6 length string with characters to the run name."
+                ),
+            )
+            parser.add_argument(
+                "--wandb-always-use-train-step",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to always use train step as the step metric in wandb. "
+                    "If set, we will always use the train steps for wandb logging, "
+                    "otherwise, will use rollout step for most info other than train/*. "
+                ),
+            )
+            parser.add_argument(
+                "--log-multi-turn",
+                action="store_true",
+                default=False,
+                help="Whether to log information for multi-turn rollout.",
+            )
+            parser.add_argument(
+                "--log-passrate",
+                action="store_true",
+                default=False,
+                help="Whether to turn on passrate logging, which will log the pass@n of the responses in the rollout.",
+            )
+            parser.add_argument(
+                "--log-reward-category",
+                type=str,
+                default=None,
+                help=(
+                    "Log statistics of the category of reward, such as why the reward function considers it as failed. "
+                    "Specify the key in the reward dict using this argument.",
+                ),
+            )
+            parser.add_argument(
+                "--log-correct-samples",
+                action="store_true",
+                default=False,
+                help="Explicitly log metrics for correct samples.",
+            )
+            parser.add_argument(
+                "--log-rollout-mbu",
+                action="store_true",
+                default=False,
+                help="Log rollout-side batch-aware decode MBU using SGLang /metrics polling.",
+            )
+            parser.add_argument(
+                "--rollout-mbu-poll-interval-seconds",
+                type=float,
+                default=1.0,
+                help="Polling interval in seconds when collecting rollout decode metrics from SGLang /metrics.",
+            )
+            parser.add_argument(
+                "--rollout-mbu-dtype-bytes",
+                type=int,
+                default=2,
+                help="Bytes per weight/KV element for rollout MBU estimation. bf16/fp16 uses 2.",
+            )
+            parser.add_argument(
+                "--rollout-mbu-peak-bandwidth-tb-per-gpu",
+                type=float,
+                default=None,
+                help="Optional override for per-GPU peak HBM bandwidth in TB/s used by rollout MBU.",
+            )
+            parser.add_argument("--wandb-run-id", type=str, default=None)
+            return parser
+
+        # mlflow
+        def add_mlflow_arguments(parser):
+            parser.add_argument("--use-mlflow", action="store_true", default=False)
+            parser.add_argument(
+                "--mlflow-tracking-uri",
+                type=str,
+                default=None,
+                help="MLflow tracking server URI. Defaults to MLFLOW_TRACKING_URI env var, or local mlruns/ directory.",
+            )
+            parser.add_argument(
+                "--mlflow-experiment-name",
+                type=str,
+                default="miles",
+                help="MLflow experiment name.",
+            )
+            parser.add_argument(
+                "--mlflow-run-name",
+                type=str,
+                default=None,
+                help="MLflow run name. Defaults to --wandb-group if not set.",
+            )
+            parser.add_argument("--mlflow-run-id", type=str, default=None)
+            return parser
+
+        # swanlab
+        def add_swanlab_arguments(parser):
+            parser.add_argument("--use-swanlab", action="store_true", default=False)
+            parser.add_argument(
+                "--swanlab-project",
+                type=str,
+                default=None,
+                help="SwanLab project name. Defaults to SWANLAB_PROJ_NAME env, then --wandb-project, then 'miles'.",
+            )
+            parser.add_argument(
+                "--swanlab-experiment-name",
+                type=str,
+                default=None,
+                help="SwanLab experiment name. Defaults to SWANLAB_EXP_NAME env, then --wandb-group.",
+            )
+            parser.add_argument("--swanlab-api-key", type=str, default=None)
+            parser.add_argument(
+                "--swanlab-log-dir",
+                type=str,
+                default=None,
+                help="Local SwanLab log directory. Defaults to SWANLAB_LOG_DIR env or 'swanlog'.",
+            )
+            parser.add_argument(
+                "--swanlab-mode",
+                type=str,
+                default=None,
+                choices=["cloud", "local", "offline", "disabled"],
+                help="SwanLab mode. Overrides SWANLAB_MODE env var.",
+            )
+            parser.add_argument("--swanlab-run-id", type=str, default=None)
+            return parser
+
+        # tensorboard
+        def add_tensorboard_arguments(parser):
+            # tb_project_name, tb_experiment_name
+            parser.add_argument("--use-tensorboard", action="store_true", default=False)
+            parser.add_argument(
+                "--tb-project-name",
+                type=str,
+                default=None,
+                help="Directory to store tensorboard logs. Default is  os.environ.get('TENSORBOARD_DIR') directory.",
+            )
+            parser.add_argument("--tb-experiment-name", type=str, default=None)
+
+            return parser
+
+        # prometheus
+        def add_prometheus_arguments(parser):
+            parser.add_argument("--use-prometheus", action="store_true", default=False)
+            parser.add_argument(
+                "--prometheus-port",
+                type=int,
+                default=int(os.environ.get("PROMETHEUS_PORT", "9090")),
+                help="Port for the Prometheus metrics HTTP server. "
+                "Prometheus scrapes /metrics on this port. "
+                "Defaults to PROMETHEUS_PORT env var or 9090.",
+            )
+            parser.add_argument(
+                "--prometheus-run-name",
+                type=str,
+                default=None,
+                help="Human-readable run name attached as a 'run_name' label to all "
+                "Prometheus metrics. Used to distinguish runs in Grafana. "
+                "Defaults to --wandb-group if set.",
+            )
+            return parser
+
+        # debug
+        def add_debug_arguments(parser):
+            parser.add_argument(
+                "--save-debug-rollout-data",
+                type=str,
+                default=None,
+                help=(
+                    "Save the rollout data to this path for debugging. "
+                    "The file will be saved to `save_debug_rollout_data.format(rollout_id)`."
+                ),
+            )
+            parser.add_argument(
+                "--load-debug-rollout-data",
+                type=str,
+                default=None,
+                help=(
+                    "Load the rollout data from this path for debugging. "
+                    "The file will be loaded from `load_debug_rollout_data.format(rollout_id)`. "
+                    "When this is enabled, miles will not instantiate sglang servers."
+                ),
+            )
+            parser.add_argument(
+                "--load-debug-rollout-data-subsample",
+                type=float,
+                default=None,
+                help="Subsample a portion of the debug rollout data for faster debugging.",
+            )
+            parser.add_argument(
+                "--debug-rollout-only",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to only run the rollout generation without training. "
+                    "This is useful for debugging the rollout generation function."
+                ),
+            )
+            parser.add_argument(
+                "--debug-train-only",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to only run the training without sglang servers. "
+                    "This is useful for debugging the rollout generation function."
+                ),
+            )
+            parser.add_argument(
+                "--save-debug-train-data",
+                type=str,
+                default=None,
+                help=(
+                    "Save the train data to this path for debugging. "
+                    "The file will be saved to `save_debug_train_data.format(rollout_id)`."
+                ),
+            )
+            parser.add_argument(
+                "--dump-details",
+                type=str,
+                default=None,
+                help=("Dump all details of training for post-hoc analysis and visualization."),
+            )
+            parser.add_argument(
+                "--icepop-dump-dir",
+                type=str,
+                default=None,
+                help=(
+                    "Directory to dump per-token (train_log_prob, rollout_log_prob) samples for the "
+                    "IcePop/TIS scatter visualization. Falls back to --dump-details when unset; the "
+                    "feature is a no-op if neither is set."
+                ),
+            )
+            parser.add_argument(
+                "--icepop-dump-steps",
+                type=int,
+                nargs="+",
+                default=[10, 50, 100],
+                help="Rollout ids (== tensorboard step) at which to dump IcePop scatter samples.",
+            )
+            parser.add_argument(
+                "--icepop-dump-max-tokens-per-rank",
+                type=int,
+                default=4000,
+                help="Per-rank cap on subsampled active tokens dumped per step for the IcePop scatter.",
+            )
+            parser.add_argument(
+                "--dumper-enable",
+                action="store_true",
+                default=False,
+                help="Enable sglang dumper for all three phases (sglang inference, "
+                "megatron forward-only, megatron forward-backward). "
+                "Per-phase --dumper-inference/--dumper-fwd-only/--dumper-fwd-bwd can override.",
+            )
+            parser.add_argument(
+                "--dumper-dir",
+                type=str,
+                default="/tmp/dumper",
+                help="Base output directory for sglang dumper. Three subdirs are created: "
+                "inference/, fwd_only/, fwd_bwd/.",
+            )
+            parser.add_argument(
+                "--dumper-inference",
+                nargs="*",
+                default=None,
+                help="SGLang inference phase dumper config as key=value pairs. "
+                "Keys map to DumperConfig fields (e.g. enable=true filter=whatever).",
+            )
+            parser.add_argument(
+                "--dumper-fwd-only",
+                nargs="*",
+                default=None,
+                help="Megatron forward-only phase dumper config as key=value pairs.",
+            )
+            parser.add_argument(
+                "--dumper-fwd-bwd",
+                nargs="*",
+                default=None,
+                help="Megatron forward-backward phase dumper config as key=value pairs.",
+            )
+            parser.add_argument(
+                "--dumper-source-patcher-config-inference",
+                type=str,
+                default=None,
+                help="Path to YAML config file for source patcher applied in SGLang inference engines.",
+            )
+            parser.add_argument(
+                "--dumper-source-patcher-config-train",
+                type=str,
+                default=None,
+                help="Path to YAML config file for source patcher applied in Megatron training actors.",
+            )
+            # use together with --record-memory-history and --memory-snapshot-path (defined in Megatron)
+            parser.add_argument(
+                "--memory-snapshot-dir",
+                type=str,
+                default=".",
+            )
+            parser.add_argument(
+                "--memory-snapshot-num-steps",
+                type=int,
+                default=None,
+            )
+            parser.add_argument(
+                "--profile-target",
+                type=str,
+                choices=["train_overall", "train_actor", "train_log_probs"],
+                default=["train_overall"],
+                nargs="+",
+            )
+            parser.add_argument(
+                "--memory-recorder",
+                type=str,
+                choices=["torch", "memray"],
+                default="torch",
+            )
+            parser.add_argument("--check-weight-update-equal", action="store_true")
+            parser.add_argument(
+                "--env-report",
+                type=str,
+                default=os.environ.get("MILES_SCRIPT_ENV_REPORT", ""),
+                help="JSON string containing environment report from external launcher.",
+            )
+            return parser
+
+        def add_network_arguments(parser):
+            parser.add_argument("--http-proxy", type=str, default=None)
+            parser.add_argument("--use-distributed-post", action="store_true", default=False)
+            return parser
+
+        def add_reward_model_arguments(parser):
+            parser.add_argument(
+                "--rm-type",
+                type=str,
+                default=None,
+                help=(
+                    "Type of the reward model. Supported types include: "
+                    "math, dapo, deepscaler, f1, gpqa, ifbench, rlvr_ifeval, code, random, "
+                    "remote_rm, llm_judge (external judge API), self_judge "
+                    "(uses the training model's own rollout engines as judge), "
+                    "llm_rubric_judge / self_rubric_judge (single-call rubric JSON score; "
+                    "see --judge-prompt-template and --metadata-key extra_info)."
+                ),
+            )
+            parser.add_argument(
+                "--reward-key",
+                type=str,
+                default=None,
+                help=(
+                    "Some reward model may return a dict instead of a value, "
+                    "this is the key to extract the reward value from the dict. "
+                ),
+            )
+            parser.add_argument(
+                "--eval-reward-key",
+                type=str,
+                default=None,
+                help="The eval variant for --reward-key",
+            )
+            parser.add_argument(
+                "--group-rm", action="store_true", default=False, help="Whether to do rm on a whole group."
+            )
+            parser.add_argument(
+                "--rm-url",
+                type=str,
+                default=None,
+                help=(
+                    "URL for the reward model service. "
+                    "For --rm-type remote_rm: the scoring endpoint, e.g. http://localhost:8000. "
+                    "For --rm-type llm_judge / llm_rubric_judge: an OpenAI-compatible chat completions endpoint, "
+                    "e.g. http://localhost:8000/v1/chat/completions."
+                ),
+            )
+            parser.add_argument(
+                "--judge-prompt-template",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a prompt template file for --rm-type llm_judge / self_judge / "
+                    "llm_rubric_judge / self_rubric_judge. "
+                    "Arena Hard style: ---SYSTEM--- / ---USER--- markers; user section placeholders "
+                    "{prompt}, {response_a}, {response_b}. "
+                    "Rubric style: placeholders {question_prompt}, {answer}, {score_point}, {predictions}, {max_score}."
+                ),
+            )
+            parser.add_argument(
+                "--judge-model",
+                type=str,
+                default="default",
+                help="Model name sent in the /v1/chat/completions request for --rm-type llm_judge / llm_rubric_judge.",
+            )
+            parser.add_argument(
+                "--judge-api-key",
+                type=str,
+                default=None,
+                help="API key for the judge LLM service (sent as Bearer token in Authorization header).",
+            )
+            parser.add_argument(
+                "--judge-proxy",
+                type=str,
+                default=None,
+                help="HTTP proxy URL for judge LLM requests, e.g. http://proxy-host:7891.",
+            )
+            parser.add_argument(
+                "--judge-kwargs",
+                type=str,
+                default="temperature=0.6,max_tokens=8192",
+                help=(
+                    "Comma-separated key=value pairs passed to the judge LLM API call. "
+                    "Example: 'temperature=0.6,max_tokens=8192'. "
+                    "Numeric values are auto-coerced to int/float."
+                ),
+            )
+            parser.add_argument(
+                "--custom-rm-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to the custom reward model function. "
+                    "If set, we will use this function to calculate the reward instead of the default one. "
+                    "The function should have the signature `def custom_rm(args, sample) -> float`."
+                ),
+            )
+            parser.add_argument(
+                "--custom-reward-post-process-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to the custom function that will post process reward, by default it will be the normalization for grpo. "
+                ),
+            )
+            parser.add_argument(
+                "--custom-convert-samples-to-train-data-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a custom function that converts samples to training data. "
+                    "If set, this function will replace the default _convert_samples_to_train_data. "
+                    "The function should have the signature `def convert_samples_to_train_data(args, samples) -> dict`."
+                ),
+            )
+            return parser
+
+        def add_rollout_buffer_arguments(parser):
+            parser.add_argument(
+                "--rollout-buffer-url",
+                type=str,
+                default=None,
+                help="URL for the rollout buffer",
+            )
+
+            parser.add_argument(
+                "--fetch-trajectory-retry-times",
+                type=int,
+                default=-1,
+                help="Number of times to retry fetching trajectory, -1 means unlimited retry",
+            )
+            parser.add_argument(
+                "--min-batch-collection-ratio",
+                type=float,
+                default=1,
+                help="Minimum batch collection ratio",
+            )
+            parser.add_argument(
+                "--rollout-task-type",
+                type=str,
+                default="math",
+            )
+            parser.add_argument(
+                "--loss-mask-type",
+                type=str,
+                default="qwen",
+                choices=["qwen", "qwen3", "distill_qwen"],
+                help="Loss mask type",
+            )
+            parser.add_argument(
+                "--data-pad-size-multiplier",
+                type=int,
+                default=128,
+                help="Multiplier for data padding size in data processing.",
+            )
+            parser.add_argument(
+                "--rollout-sample-filter-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to the rollout sample filter function. "
+                    "This function determines whether a sample will participate in loss calculation. "
+                    "The function is called as `fn(args, data)` where `data` is `list[list[Sample]]` "
+                    "(grouped by n_samples_per_prompt), and should return None. "
+                    "To exclude a sample from the loss, set `sample.remove_sample = True`. "
+                    "Note: This attribute does not determine whether the sample participates in advantage normalization."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-all-samples-process-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to the rollout all samples process function that "
+                    "can process all samples including filtered ones."
+                ),
+            )
+            parser.add_argument(
+                "--disable-rollout-trim-samples",
+                action="store_true",
+                default=False,
+                help="disable trim samples in rollout buffer when converting samples to train data",
+            )
+            parser.add_argument(
+                "--use-dynamic-global-batch-size",
+                action="store_true",
+                default=False,
+                help="enable dynamic global batch size, disable trim samples in rollout buffer when converting samples to train data",
+            )
+            return parser
+
+        def add_custom_megatron_plugins_arguments(parser):
+            """
+            Add custom Megatron plugins arguments.
+            This is a placeholder for any additional arguments that might be needed.
+            """
+            # Custom arguments can be added here
+            parser.add_argument(
+                "--custom-megatron-init-path",
+                type=str,
+                default=None,
+            )
+            parser.add_argument(
+                "--custom-megatron-before-log-prob-hook-path",
+                type=str,
+                default=None,
+            )
+            parser.add_argument(
+                "--custom-megatron-before-train-step-hook-path",
+                type=str,
+                default=None,
+            )
+            return parser
+
+        def add_mtp_training_arguments(parser):
+            """Add MTP training specific arguments."""
+            reset_arg(parser, "--mtp-num-layers", type=int, default=None)
+            reset_arg(parser, "--mtp-loss-scaling-factor", type=float, default=0.2)
+            parser.add_argument(
+                "--enable-mtp-training",
+                action="store_true",
+                default=False,
+                help="Enable MTP layer parameter updates during training",
+            )
+
+            return parser
+
+        def add_prefill_decode_disaggregation_arguments(parser):
+            parser.add_argument(
+                "--prefill-num-servers",
+                type=int,
+                default=None,
+                help="Number of prefill servers for disaggregation.",
+            )
+            return parser
+
+        def add_ci_arguments(parser):
+            parser.add_argument(
+                "--ci-test",
+                action="store_true",
+            )
+            parser.add_argument(
+                "--ci-disable-kl-checker",
+                action="store_true",
+            )
+            parser.add_argument(
+                "--ci-disable-logprobs-checker",
+                action="store_true",
+            )
+            parser.add_argument(
+                "--ci-metric-checker-key",
+                type=str,
+                default=None,
+            )
+            parser.add_argument(
+                "--ci-metric-checker-threshold",
+                type=float,
+                default=None,
+            )
+            parser.add_argument(
+                "--ci-save-grad-norm",
+                type=str,
+                default=None,
+            )
+            parser.add_argument(
+                "--ci-load-grad-norm",
+                type=str,
+                default=None,
+            )
+            parser.add_argument(
+                "--ci-save-model-hash",
+                action="store_true",
+            )
+            parser.add_argument(
+                "--ci-check-model-hash",
+                action="store_true",
+            )
+            return parser
+
+        def add_session_arguments(parser):
+            parser.add_argument(
+                "--use-session-server",
+                action="store_true",
+                default=False,
+                help="Start a standalone session server for TITO/session support. "
+                "Requires --hf-checkpoint and --chat-template-path to also be set.",
+            )
+            parser.add_argument(
+                "--session-server-ip",
+                type=str,
+                default=None,
+                help="IP address of the standalone session server. Defaults to sglang-router-ip.",
+            )
+            parser.add_argument(
+                "--session-server-port",
+                type=int,
+                default=None,
+                help="Port of the standalone session server. Auto-allocated if not set.",
+            )
+            parser.add_argument(
+                "--tito-model",
+                type=str,
+                default="default",
+                choices=[t.value for t in TITOTokenizerType],
+                help="TITO tokenizer type for pretokenized prefix reuse. "
+                "Controls how token IDs are computed for messages appended after "
+                "the pretokenized prefix in multi-turn agentic sessions.",
+            )
+            parser.add_argument(
+                "--tito-allowed-append-roles",
+                nargs="+",
+                default=["tool"],
+                choices=["tool", "user", "system"],
+                help="Message roles allowed to be appended after the pretokenized "
+                "assistant prefix in TITO sessions (default: tool).",
+            )
+            return parser
+
+        def add_user_provided_function_arguments(parser):
+            try:
+                args_partial, _ = parser.parse_known_args()
+            except SystemExit:
+                return parser
+            for path in [
+                args_partial.rollout_function_path,
+                args_partial.custom_generate_function_path,
+            ]:
+                try:
+                    fn = load_function(path)
+                except (ModuleNotFoundError, ValueError):
+                    continue
+                if fn is not None and callable(getattr(fn, "add_arguments", None)):
+                    fn.add_arguments(parser)
+            return parser
+
+        def add_sglang_tp_size():
+            temp_parser = argparse.ArgumentParser(add_help=False)
+            temp_parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
+            temp_args, _ = temp_parser.parse_known_args()
+            sglang_tp_size = temp_args.rollout_num_gpus_per_engine
+            return sglang_tp_size
+
+        # Add custom arguments in front to prevent overwritten some miles arguments.
+        if add_custom_arguments is not None:
+            parser = add_custom_arguments(parser)
+
+        parser = add_cluster_arguments(parser)
+        parser = add_train_arguments(parser)
+        parser = add_rollout_arguments(parser)
+        parser = add_fault_tolerance_arguments(parser)
+        parser = add_data_arguments(parser)
+        parser = add_eval_arguments(parser)
+        parser = add_algo_arguments(parser)
+        parser = add_lora_arguments(parser)
+        parser = add_wandb_arguments(parser)
+        parser = add_mlflow_arguments(parser)
+        parser = add_swanlab_arguments(parser)
+        parser = add_tensorboard_arguments(parser)
+        parser = add_prometheus_arguments(parser)
+        parser = add_router_arguments(parser)
+        parser = add_debug_arguments(parser)
+        parser = add_sglang_arguments(parser)
+        parser = add_session_arguments(parser)
+        parser = add_network_arguments(parser)
+        parser = add_reward_model_arguments(parser)
+        parser = add_rollout_buffer_arguments(parser)
+        parser = add_mtp_training_arguments(parser)
+        parser = add_prefill_decode_disaggregation_arguments(parser)
+        parser = add_ci_arguments(parser)
+        parser = add_custom_megatron_plugins_arguments(parser)
+        if enable_experimental_rollout_refactor():
+            parser = add_user_provided_function_arguments(parser)
+
+        reset_arg(
+            parser,
+            "--custom-config-path",
+            type=str,
+            default=None,
+            help="Path to the YAML config for custom function arguments.",
+        )
+        reset_arg(parser, "--padded-vocab-size", type=int, default=None)
+
+        parser.set_defaults(sglang_tensor_parallel_size=add_sglang_tp_size())
+        return parser
+
+    return add_miles_arguments
+
+
+def parse_args(add_custom_arguments=None):
+    # Users may call `parse_args` very early, thus we ensure logger is configured here
+    configure_logger()
+
+    add_miles_arguments = get_miles_extra_args_provider(add_custom_arguments)
+
+    backend = parse_args_train_backend()
+    if backend == "megatron":
+        from miles.backends.megatron_utils.arguments import parse_args as megatron_parse_args
+        from miles.backends.megatron_utils.arguments import set_default_megatron_args
+        from miles.backends.megatron_utils.arguments import validate_args as megatron_validate_args
+
+        args = megatron_parse_args(extra_args_provider=add_miles_arguments)
+        if args.hf_checkpoint:
+            hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
+            hf_validate_args(args, hf_config)
+
+        args.rank = 0
+        args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
+        args = set_default_megatron_args(args)
+    else:
+        from miles.backends.experimental.fsdp_utils.arguments import load_fsdp_args
+
+        args = load_fsdp_args(extra_args_provider=add_miles_arguments)
+        args.rank = 0  # Primary process rank for wandb initialization
+        args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
+
+        assert args.context_parallel_size == 1, "Context parallelism is not supported for FSDP backend."
+
+        if not args.ci_test:
+            raise ValueError(
+                "The FSDP backend has known issues with SGLang v0.5.10 and is not actively maintained in the current version. "
+                "It has been moved to miles.backends.experimental. "
+                "Contributions are welcome if you are interested in improving it."
+            )
+
+    miles_validate_args(args)
+
+    if backend == "megatron":
+        megatron_validate_args(args)
+
+        # always use varlen
+        args.variable_seq_lengths = True
+        if getattr(args, "moe_token_dispatcher_type", None) == "allgather":
+            logger.info(
+                "--moe-token-dispatcher-type allgather does not support variable sequence length, "
+                "please use alltoall dispatcher instead."
+            )
+            args.moe_token_dispatcher_type = "alltoall"
+
+        if args.pipeline_model_parallel_size == 1:
+            assert args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None, (
+                "decoder_first_pipeline_num_layers and decoder_last_pipeline_num_layers should be None when "
+                "pipeline_model_parallel_size is 1."
+            )
+
+    sglang_validate_args(args)
+
+    return args
+
+
+def parse_args_train_backend():
+    if os.environ.get("MILES_BACKEND") is not None:
+        raise Exception("`MILES_BACKEND` is deprecated, please use --train-backend directly.")
+
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args_partial, _ = parser.parse_known_args()
+    return args_partial.train_backend
+
+
+def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
+    """
+    Build evaluation dataset configurations from either --eval-config or --eval-prompt-data.
+    """
+    datasets_config = []
+    defaults: dict[str, Any] = {}
+
+    if args.eval_config:
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.load(args.eval_config)
+        cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+        if not isinstance(cfg_dict, dict):
+            raise ValueError("--eval-config must contain a mapping at the root.")
+
+        eval_cfg = cfg_dict.get("eval", cfg_dict)
+        if not isinstance(eval_cfg, dict):
+            raise ValueError("--eval-config must define an `eval` mapping or be a mapping itself.")
+
+        defaults = dict(eval_cfg.get("defaults") or {})
+        datasets_config = ensure_dataset_list(eval_cfg.get("datasets"))
+        if not datasets_config:
+            raise ValueError("--eval-config does not define any datasets under `eval.datasets`.")
+    elif args.eval_prompt_data:
+        values = list(args.eval_prompt_data)
+        if len(values) == 1:
+            logger.info("[legacy] only one eval_prompt_data detected, will assume it is data for aime")
+            values = ["aime", values[0]]
+        if len(values) % 2 != 0:
+            raise ValueError("eval prompt data must be provided as name/path pairs.")
+        
+        # Merge paths for the same dataset name
+        datasets_map = {}
+        for i in range(0, len(values), 2):
+            name = values[i]
+            path = values[i + 1]
+            if name in datasets_map:
+                existing_path = datasets_map[name]["path"]
+                if isinstance(existing_path, list):
+                    existing_path.append(path)
+                else:
+                    datasets_map[name]["path"] = [existing_path, path]
+            else:
+                datasets_map[name] = {"name": name, "path": path}
+        datasets_config = list(datasets_map.values())
+    else:
+        datasets_config = []
+
+    eval_datasets = build_eval_dataset_configs(args, datasets_config, defaults)
+    if eval_datasets:
+        args.eval_prompt_data = [item for dataset in eval_datasets for item in (dataset.name, dataset.path)]
+    else:
+        args.eval_prompt_data = None
+
+    return eval_datasets
+
+
+def miles_validate_args(args):
+    args.eval_datasets = _resolve_eval_datasets(args)
+
+    if args.recompute_logprobs_via_prefill:
+        assert args.true_on_policy_mode, "--recompute-logprobs-via-prefill requires --true-on-policy-mode"
+
+    # Normalize --tito-allowed-append-roles: lowercase + deduplicate.
+    raw_roles = getattr(args, "tito_allowed_append_roles", ["tool"])
+    args.tito_allowed_append_roles = sorted(set(r.lower() for r in raw_roles))
+
+    if not args.use_session_server:
+        misconfigured = []
+        if args.tito_model != TITOTokenizerType.DEFAULT.value:
+            misconfigured.append(f"--tito-model={args.tito_model}")
+        if args.tito_allowed_append_roles != ["tool"]:
+            misconfigured.append(f"--tito-allowed-append-roles={args.tito_allowed_append_roles}")
+        if misconfigured:
+            raise ValueError(
+                f"{', '.join(misconfigured)} require --use-session-server; "
+                "these flags only configure the session-server TITO middleware."
+            )
+
+    if "user" in args.tito_allowed_append_roles:
+        logger.warning(
+            "--tito-allowed-append-roles includes 'user'. "
+            "Incremental tokenization assumes appended messages do not change how "
+            "earlier turns render, which may not hold for user messages on "
+            "context-sensitive chat templates (e.g. last_query_index logic, "
+            "thinking-token trimming). This can cause input_ids to diverge from "
+            "the canonical template output. Use at your own risk."
+        )
+
+    if args.debug_disable_optimizer:
+        args.no_load_optim = True
+        args.no_save_optim = True
+
+    # Normalize the deprecated ``--chat-template-path=autofix`` alias to None
+    # up-front so the rest of this block treats it as "no path given".
+    if args.chat_template_path == "autofix":
+        logger.warning(
+            "--chat-template-path=autofix is deprecated; remove the flag and rely "
+            "on --tito-model + --tito-allowed-append-roles to auto-resolve. The "
+            "alias will be removed in a future release."
+        )
+        args.chat_template_path = None
+
+    # Auto-resolve a bundled fixed chat-template only when:
+    #   1. the caller did NOT pass --chat-template-path (an explicit path always
+    #      wins and is never overridden)
+    #   2. the caller chose a non-default --tito-model family (DEFAULT means
+    #      "use the model's native HF chat template", which is loaded by
+    #      AutoTokenizer.from_pretrained — no override needed here)
+    should_auto_resolve = args.chat_template_path is None and args.tito_model != TITOTokenizerType.DEFAULT.value
+
+    if should_auto_resolve:
+        tito_model = TITOTokenizerType(args.tito_model)
+        from miles.utils.chat_template_utils import resolve_fixed_chat_template
+
+        resolved_path, resolved_kwargs = resolve_fixed_chat_template(
+            tito_model,
+            allowed_append_roles=args.tito_allowed_append_roles,
+        )
+        if resolved_path is not None:
+            args.chat_template_path = resolved_path
+        # Merge inferred kwargs.  User-explicit values win on conflict; only
+        # keys the user did not set are auto-filled.
+        if resolved_kwargs:
+            user_kwargs = args.apply_chat_template_kwargs or {}
+            for key, value in resolved_kwargs.items():
+                if key in user_kwargs:
+                    continue
+                user_kwargs[key] = value
+                logger.warning(
+                    "Auto-set --apply-chat-template-kwargs %s=%r for tito_model=%s "
+                    "(allowed_append_roles=%s); pass an explicit value to override.",
+                    key,
+                    value,
+                    tito_model.value,
+                    sorted(args.tito_allowed_append_roles),
+                )
+            args.apply_chat_template_kwargs = user_kwargs
+
+    if args.chat_template_path is not None:
+        if not os.path.isfile(args.chat_template_path):
+            raise FileNotFoundError(f"--chat-template-path file not found: {args.chat_template_path}")
+        args.sglang_chat_template = args.chat_template_path
+
+    if args.kl_coef != 0 or args.use_kl_loss:
+        if not os.path.exists(args.ref_load):
+            raise FileNotFoundError(f"ref_load {args.ref_load} does not exist, please check the path.")
+
+        if not os.path.exists(os.path.join(args.ref_load, "latest_checkpointed_iteration.txt")):
+            logger.info(
+                f"ref_load {args.ref_load} does not have latest_checkpointed_iteration.txt, "
+                "please make sure it is a valid megatron checkpoint directory."
+            )
+
+    # TODO: During loading, we need to set the start_rollout_id here.
+    if args.megatron_to_hf_mode == "bridge":
+        if args.load is None:
+            args.load = args.ref_load or args.hf_checkpoint
+        args.start_rollout_id = 0
+    else:
+        if (
+            args.load is None
+            or not os.path.exists(args.load)
+            or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
+        ):
+            args.no_load_optim = True
+            args.no_load_rng = True
+            args.finetune = True
+            args.load = args.ref_load
+            if args.ref_ckpt_step is not None:
+                args.ckpt_step = args.ref_ckpt_step
+            args.start_rollout_id = 0
+
+    if args.eval_interval is not None:
+        assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."
+
+    if args.save_interval is not None:
+        assert args.save is not None, "'--save' is required when save_interval is set."
+
+    if args.save_hf is not None:
+        try:
+            args.save_hf.format(rollout_id=0)
+        except (IndexError, KeyError, ValueError) as e:
+            raise AssertionError(
+                f"--save-hf template {args.save_hf!r} is invalid; it is formatted as "
+                f"save_hf.format(rollout_id=...), e.g. '.../hf/iter_{{rollout_id:07d}}': {e}"
+            ) from e
+
+    if args.save_hf_interval is not None:
+        assert args.save_hf is not None, "'--save-hf' is required when --save-hf-interval is set."
+        assert args.save_hf_interval > 0, (
+            f"--save-hf-interval must be a positive integer, got {args.save_hf_interval}. "
+            "To disable the HF export, omit --save-hf instead."
+        )
+        assert args.save_interval is not None and args.save_hf_interval % args.save_interval == 0, (
+            f"--save-hf-interval ({args.save_hf_interval}) must be a multiple of --save-interval "
+            f"({args.save_interval}): the HF export only runs inside a checkpoint save."
+        )
+
+    # Parse LoRA target modules
+    if args.lora_rank > 0:
+        assert args.target_modules is not None, "'--target-modules' is required when LoRA is enabled."
+
+        if args.target_modules == "all-linear":
+            modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        elif "," in args.target_modules:
+            modules = [m.strip() for m in args.target_modules.split(",")]
+        else:
+            modules = [args.target_modules]
+
+        if args.exclude_modules:
+            exclude_set = (
+                set(m.strip() for m in args.exclude_modules.split(","))
+                if "," in args.exclude_modules
+                else {args.exclude_modules}
+            )
+            modules = [m for m in modules if m not in exclude_set]
+
+        args.target_modules = modules
+
+    assert not (args.kl_coef != 0 and args.kl_loss_coef != 0), "Only one of kl_coef and kl_loss_coef can be set"
+
+    if args.advantage_estimator in ["reinforce_plus_plus", "reinforce_plus_plus_baseline"]:
+        assert args.normalize_advantages, (
+            "The 'reinforce_plus_plus' and 'reinforce_plus_plus_baseline' advantage estimators "
+            "require advantage normalization. Please add `--normalize-advantages` to your command."
+        )
+
+    if args.use_rollout_logprobs:
+        assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
+
+    if args.get_mismatch_metrics:
+        assert (
+            args.custom_tis_function_path is not None
+        ), "custom_tis_function_path must be set when get_mismatch_metrics is set"
+
+        if args.use_rollout_logprobs:
+            logger.info(
+                "get_mismatch_metrics is set; For metrics calculation, the log probs will still be recomputed by training engine. One more forward pass will be applied."
+            )
+
+    if args.use_dynamic_batch_size:
+        assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
+        if args.log_probs_max_tokens_per_gpu is None:
+            args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
+
+    if args.eps_clip_high is None:
+        args.eps_clip_high = args.eps_clip
+
+    if args.eval_reward_key is None:
+        args.eval_reward_key = args.reward_key
+
+    if args.dump_details is not None:
+        args.save_debug_rollout_data = f"{args.dump_details}/rollout_data/{{rollout_id}}.pt"
+        args.save_debug_train_data = f"{args.dump_details}/train_data/{{rollout_id}}_{{rank}}.pt"
+
+    if args.load_debug_rollout_data is not None:
+        logger.info(
+            f"load_debug_rollout_data {args.load_debug_rollout_data} is set, "
+            "will not instantiate sglang servers and will only run the training process."
+        )
+        args.debug_train_only = True
+
+    args.use_critic = args.advantage_estimator == "ppo"
+    if args.critic_num_gpus_per_node is None:
+        args.critic_num_gpus_per_node = args.actor_num_gpus_per_node
+    if args.critic_num_nodes is None:
+        args.critic_num_nodes = args.actor_num_nodes
+    if args.critic_load is None:
+        args.critic_load = args.load
+    if args.critic_lr is None:
+        args.critic_lr = args.lr
+
+    if args.offload:
+        args.offload_train = True
+        args.offload_rollout = True
+    del args.offload
+
+    if args.debug_rollout_only:
+        if args.colocate and (not args.rollout_num_gpus):
+            args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
+        else:
+            args.actor_num_gpus_per_node = min(8, args.rollout_num_gpus)
+            args.actor_num_nodes = args.rollout_num_gpus // args.actor_num_gpus_per_node
+        args.colocate = False
+        args.offload_train = args.offload_rollout = False
+        if args.train_memory_margin_bytes > 0:
+            logger.warning("Force train_memory_margin_bytes=0 since debug_rollout_only does not support it")
+            args.train_memory_margin_bytes = 0
+
+    assert not (args.debug_rollout_only and args.debug_train_only), (
+        "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
+    )
+
+    # always true on offload for colocate at the moment.
+    if args.update_weight_transfer_mode == "p2p":
+        assert not args.colocate, (
+            "P2P weight transfer mode is not compatible with --colocate. "
+            "Please use broadcast mode or disable colocate."
+        )
+        assert (
+            getattr(args, "prefill_num_servers", None) is None
+        ), "P2P weight transfer mode has not been tested when PD is enabled."
+
+    if args.colocate:
+        if args.offload_train is None:
+            args.offload_train = True
+        if args.offload_rollout is None:
+            args.offload_rollout = True
+        if args.sglang_enforce_piecewise_cuda_graph:
+            logger.warning("Warning: colocate mode with --sglang-enforce-piecewise-cuda-graph may trigger NVLS OOM.")
+        if not args.sglang_disable_piecewise_cuda_graph:
+            args.sglang_disable_piecewise_cuda_graph = True
+            logger.info(
+                "Colocate mode: defaulting --sglang-disable-piecewise-cuda-graph to avoid NVLS OOM. "
+                "Use --sglang-enforce-piecewise-cuda-graph to override."
+            )
+        if args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
+            logger.info(
+                f"rollout_num_gpus {args.rollout_num_gpus} != actor_num_gpus_per_node {args.actor_num_gpus_per_node} "
+                f"* actor_num_nodes {args.actor_num_nodes}, overriding rollout_num_gpus to match actor_num_gpus_per_node * actor_num_nodes."
+            )
+            args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
+            if args.use_critic:
+                args.rollout_num_gpus += args.critic_num_gpus_per_node * args.critic_num_nodes
+
+    if args.offload_train is None:
+        args.offload_train = False
+    if args.offload_rollout is None:
+        args.offload_rollout = False
+
+    if args.offload_train:
+        args.disable_grad_buffers_cpu_backup = True
+        args.disable_param_buffers_cpu_backup = args.enable_weights_backuper
+
+    if args.eval_function_path is None:
+        args.eval_function_path = args.rollout_function_path
+
+    if args.num_steps_per_rollout is not None:
+        global_batch_size = args.rollout_batch_size * args.n_samples_per_prompt // args.num_steps_per_rollout
+        if args.global_batch_size is not None:
+            assert args.global_batch_size == global_batch_size, (
+                f"global_batch_size {args.global_batch_size} is not equal to "
+                f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
+                f"// num_steps_per_rollout {args.num_steps_per_rollout}"
+            )
+        args.global_batch_size = global_batch_size
+
+    if args.n_samples_per_prompt == 1:
+        args.grpo_std_normalization = False
+        logger.info("n_samples_per_prompt is set to 1, grpo_std_normalization will be set to False.")
+
+    if args.over_sampling_batch_size is None:
+        args.over_sampling_batch_size = args.rollout_batch_size
+
+    assert args.over_sampling_batch_size >= args.rollout_batch_size, (
+        f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
+        f"rollout_batch_size {args.rollout_batch_size}"
+    )
+
+    if args.num_epoch is not None:
+        if args.num_rollout is not None:
+            logger.info("Both num_epoch and num_rollout are set, num_epoch will be ignored.")
+        else:
+            assert args.rollout_global_dataset, (
+                "num_epoch is set, but rollout_global_dataset is not set, "
+                "please remove --disable-rollout-global-dataset to use num_epoch"
+            )
+    else:
+        # if num_epoch is not set, we should set num_rollout
+        assert args.num_rollout is not None, (
+            "num_epoch is not set, but num_rollout is not set, " "please set --num-rollout or --num-epoch"
+        )
+
+    if args.enable_mtp_training:
+        assert args.mtp_num_layers, "mtp_num_layers must be set when enable_mtp_training is set"
+
+    if args.use_rollout_routing_replay:
+        args.use_routing_replay = True
+
+    if args.custom_config_path:
+        with open(args.custom_config_path) as f:
+            data = yaml.safe_load(f) or {}
+        for k, v in data.items():
+            if hasattr(args, k):
+                logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
+            setattr(args, k, v)
+
+    if args.eval_max_context_len is None:
+        logger.info(
+            f"args.eval_max_context_len is not set. Use args.rollout_max_context_len {args.rollout_max_context_len} as default value."
+        )
+        args.eval_max_context_len = args.rollout_max_context_len
+
+    if args.rollout_max_context_len is not None:
+        if args.rollout_max_prompt_len is None:
+            args.rollout_max_prompt_len = args.rollout_max_context_len - 1
+            logger.info(
+                f"args.rollout_max_prompt_len is not set. Use args.rollout_max_context_len - 1 ({args.rollout_max_context_len} - 1) as default value so that there is at least one generated token to compute loss."
+            )
+        assert (
+            args.rollout_max_prompt_len <= args.rollout_max_context_len - 1
+        ), f"args.rollout_max_prompt_len ({args.rollout_max_prompt_len}) must be smaller than args.rollout_max_context_len ({args.rollout_max_context_len}) so that there is at least one generated token to compute loss."
+
+    assert not (
+        args.prefill_num_servers is not None and args.rollout_external
+    ), "prefill_num_servers cannot be set when rollout_external is set."
+
+    assert not (
+        getattr(args, "sglang_config", None) is not None and args.rollout_external
+    ), "sglang_config cannot be set when rollout_external is set."
+
+    assert not (
+        getattr(args, "sglang_config", None) is not None and getattr(args, "prefill_num_servers", None) is not None
+    ), "sglang_config and prefill_num_servers are mutually exclusive. Use server_groups in the YAML config instead."
+
+    if args.qkv_format == "bshd":
+        assert args.train_backend == "megatron", "bshd format is only supported for megatron backend."
+        assert (
+            args.use_dynamic_batch_size is False
+        ), "Dynamic batch size is not supported for bshd format. Please specify --micro-batch-size instead."
+
+    if getattr(args, "log_rollout_mbu", False):
+        assert args.rollout_mbu_poll_interval_seconds > 0, "rollout_mbu_poll_interval_seconds must be positive."
+        assert args.rollout_mbu_dtype_bytes > 0, "rollout_mbu_dtype_bytes must be positive."
+        if not getattr(args, "sglang_enable_metrics", False):
+            logger.info("Enable SGLang /metrics automatically because --log-rollout-mbu is set.")
+            args.sglang_enable_metrics = True
+
+    overlong_buffer_len = getattr(args, "overlong_buffer_len", 0) or 0
+    assert overlong_buffer_len >= 0, "--overlong-buffer-len must be >= 0."
+    if overlong_buffer_len > 0:
+        assert args.rollout_max_response_len is not None, (
+            "--overlong-buffer-len requires --rollout-max-response-len to be set."
+        )
+        assert overlong_buffer_len < args.rollout_max_response_len, (
+            f"--overlong-buffer-len {overlong_buffer_len} must be smaller than "
+            f"--rollout-max-response-len {args.rollout_max_response_len}."
+        )
+
+    if getattr(args, "critic_exclude_overlong_penalty", False):
+        assert getattr(args, "advantage_estimator", None) == "ppo", (
+            "--critic-exclude-overlong-penalty only makes sense with a critic "
+            "(--advantage-estimator ppo)."
+        )
+        logger.info(
+            "critic_exclude_overlong_penalty: ON — critic value-loss returns will be computed "
+            "from rewards WITHOUT the overlong penalty; actor advantages are unchanged."
+        )
+
+    if getattr(args, "critic_exclude_length_reward", False):
+        assert getattr(args, "advantage_estimator", None) == "ppo", (
+            "--critic-exclude-length-reward only makes sense with a critic "
+            "(--advantage-estimator ppo)."
+        )
+        logger.info(
+            "critic_exclude_length_reward: ON — critic value-loss returns will be computed from "
+            "rewards WITHOUT the in-group relative length reward; actor advantages are unchanged."
+        )
+
+    if getattr(args, "olp_analytic_inject", False):
+        assert getattr(args, "advantage_estimator", None) == "ppo", (
+            "--olp-analytic-inject only makes sense with a critic (--advantage-estimator ppo): "
+            "the analytic injection lives in the PPO GAE path."
+        )
+        assert overlong_buffer_len > 0, (
+            "--olp-analytic-inject requires --overlong-buffer-len > 0; otherwise the overlong "
+            "penalty is identically zero and there is nothing to inject."
+        )
+        assert not getattr(args, "critic_exclude_overlong_penalty", False), (
+            "--olp-analytic-inject and --critic-exclude-overlong-penalty are mutually exclusive: "
+            "analytic injection already keeps OLP out of rewards/GAE/critic entirely (a superset "
+            "of the critic-side exclusion). Pick one."
+        )
+        assert getattr(args, "custom_reward_post_process_path", None) is None, (
+            "--olp-analytic-inject cannot be combined with --custom-reward-post-process-path: "
+            "the training side injects the overlong penalty unconditionally, so a custom "
+            "post-process that applies its own OLP would double-count it."
+        )
+        assert getattr(args, "olp_inject_alpha", 0.1) > 0, "--olp-inject-alpha must be > 0."
+        logger.info(
+            "olp_analytic_inject: ON — overlong penalty leaves the learning channel entirely "
+            "(rewards/GAE/critic targets all clean) and is injected analytically into the "
+            f"advantages after GAE, alpha={getattr(args, 'olp_inject_alpha', 0.1)} "
+            "(lambda = clamp(1 - 1/(alpha*L), min=0), token at distance d from the end "
+            "weighted lambda^d)."
+        )
+
+    if getattr(args, "group_center_inject", False):
+        assert getattr(args, "advantage_estimator", None) == "ppo", (
+            "--group-center-inject only makes sense with a critic (--advantage-estimator ppo): "
+            "the terminal scalar a_j = raw_reward_j - V_j needs critic values."
+        )
+        assert getattr(args, "vapo_lambda_alpha", None), (
+            "--group-center-inject requires --vapo-lambda-alpha: the injection decay "
+            "lambda_i = clamp(1 - 1/(alpha*L_i), min=0) reuses it (no separate alpha "
+            "hyperparameter by design)."
+        )
+        logger.info(
+            "group_center_inject: ON — leave-one-out group centering injected into the actor's "
+            "advantages after GAE (a_j = raw_reward_j - V_j at the last loss-mask token, "
+            "P_i = -mean of the other group members' a_j, decayed with the VAPO lambda, "
+            f"alpha={getattr(args, 'vapo_lambda_alpha', None)}); "
+            "returns untouched — the critic keeps learning the uncentered return."
+        )
+
+    _maybe_apply_dumper_overrides(args)
+
+
+def _maybe_apply_dumper_overrides(args) -> None:
+    if not args.dumper_enable:
+        return
+
+    if args.use_fault_tolerance:
+        logger.info("Dumper mode: disabling --use-fault-tolerance to suppress RolloutHealthMonitor heartbeats")
+        args.use_fault_tolerance = False
+
+    logger.info("Dumper mode: all heartbeat mechanisms disabled")
+    args.router_disable_health_check = True
+    args.rollout_health_check_interval = 1e18
+
+    if args.start_rollout_id is None:
+        args.start_rollout_id = 0
+
+    args.num_rollout = (args.start_rollout_id or 0) + 1
+    logger.info(
+        "Dumper mode: forced rollout range [%d, %d), disabled eval and save",
+        args.start_rollout_id,
+        args.num_rollout,
+    )
+    args.eval_interval = None
+    args.save = None
+    args.save_interval = None
+    args.save_retain_interval = None
+
+
+def hf_validate_args(args, hf_config):
+    def equal(x, y):
+        return x == y
+
+    def get_megatron_arg(name: str):
+        """Resolve Megatron CLI arg name (e.g. norm_epsilon vs layernorm_epsilon)."""
+        if hasattr(args, name):
+            return getattr(args, name)
+        if name == "layernorm_epsilon" and hasattr(args, "norm_epsilon"):
+            return args.norm_epsilon
+        if name == "norm_epsilon" and hasattr(args, "layernorm_epsilon"):
+            return args.layernorm_epsilon
+        raise AttributeError(f"Namespace has no attribute {name!r}")
+
+    errors = []
+
+    # multimodal models have different config structure
+    if hasattr(hf_config, "text_config"):
+        hf_config = hf_config.text_config
+
+    if hasattr(hf_config, "rope_parameters") and isinstance(hf_config.rope_parameters, dict):
+        if "rope_theta" in hf_config.rope_parameters:
+            hf_config.rope_theta = hf_config.rope_parameters["rope_theta"]
+
+    for hf_config_name, megatron_config_name, compare_fn in [
+        ("hidden_size", "hidden_size", equal),
+        ("num_attention_heads", "num_attention_heads", equal),
+        ("num_hidden_layers", "num_layers", equal),
+        ("intermediate_size", "ffn_hidden_size", equal),
+        ("tie_word_embeddings", "untie_embeddings_and_output_weights", lambda x, y: not x == y),
+        (
+            "rms_norm_eps",
+            "norm_epsilon" if os.getenv("DEPRECATED_MEGATRON_COMPATIBLE", "0") == "1" else "layernorm_epsilon",
+            equal,
+        ),
+        ("rope_theta", "rotary_base", equal),
+    ]:
+        # FIXME: Qwen3.5 transfomers has bug.
+        if getattr(hf_config, "model_type", "") == "qwen3_5_moe_text" and hf_config_name == "intermediate_size":
+            continue
+        if hasattr(hf_config, hf_config_name):
+            if not compare_fn(getattr(hf_config, hf_config_name), get_megatron_arg(megatron_config_name)):
+                errors.append(
+                    f"{hf_config_name} in hf config {getattr(hf_config, hf_config_name)} is not equal to "
+                    f"{megatron_config_name} {get_megatron_arg(megatron_config_name)}, please check the config."
+                )
+
+    if len(errors) > 0:
+        raise AssertionError("hf_validate_args failed: " + "; ".join(errors))

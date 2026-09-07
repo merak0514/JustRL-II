@@ -1,0 +1,129 @@
+import asyncio
+import os
+import random
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+
+import aiohttp
+
+from miles.utils.misc import load_function
+from miles.utils.types import Sample
+
+from .deepscaler import get_deepscaler_rule_based_reward
+from .f1 import f1_score
+from .gpqa import compute_gpqa_reward
+from .math_dapo_utils import compute_score as compute_score_dapo
+from .rouge_l import compute_rouge_l_reward
+from .math_utils import extract_answer as extract_boxed_answer
+from .math_utils import grade_answer_union, grade_answer_verl
+
+_PRIME_NUM_PROCESSES = int(os.environ.get("PRIME_NUM_PROCESSES", "64"))
+_code_rm_executor = ProcessPoolExecutor(max_workers=_PRIME_NUM_PROCESSES)
+
+
+async def remote_rm(args, sample: Sample):
+    payload = {
+        "prompt": sample.prompt,
+        "response": sample.response,
+        "label": sample.label,
+    }
+    session_kwargs = {}
+    async with aiohttp.ClientSession(**session_kwargs) as session:
+        async with session.post(args.rm_url, json=payload) as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
+
+async def async_rm(args, sample: Sample, **kwargs):
+    if args.custom_rm_path is not None:
+        rm_function = load_function(args.custom_rm_path)
+        return await rm_function(args, sample, **kwargs)
+
+    metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+    rm_type = (metadata.get("rm_type") or args.rm_type or "").strip()
+    response = sample.response
+    label = sample.label
+    if rm_type.startswith("boxed_"):
+        response = extract_boxed_answer(response) or ""
+        rm_type = rm_type[len("boxed_") :]
+
+    # This function is intended for remote or time-consuming reward model evaluation.
+    # Implement the actual logic as needed.
+    if rm_type == "remote_rm":
+        return await remote_rm(args, sample)
+    elif rm_type == "deepscaler":
+        return get_deepscaler_rule_based_reward(response, label)
+    elif rm_type == "dapo":
+        return compute_score_dapo(response, label)
+    elif rm_type == "math" or rm_type.startswith("union("):
+        # s0/s9 系数据集的 metadata.rm_type 记录的是离线判分口径字符串
+        # (如 "union(deepscaler_rule_based, math_verify)")，语义即双 verifier 并集
+        return 1 if grade_answer_union(response, label) else 0
+    elif rm_type == "f1":
+        return f1_score(response, label)[0]
+    elif rm_type == "rouge_l":
+        return compute_rouge_l_reward(response, label)
+    elif rm_type == "gpqa":
+        return compute_gpqa_reward(response, label, metadata=metadata)
+    elif rm_type == "ifbench":
+        from .ifbench import compute_ifbench_reward
+
+        return compute_ifbench_reward(response, label, metadata=metadata)
+    elif rm_type == "rlvr_ifeval":
+        from .rlvr_ifeval import compute_rlvr_ifeval_reward
+
+        return compute_rlvr_ifeval_reward(response, label, metadata=metadata)
+    elif rm_type == "random":
+        return random.randint(0, 1)
+    elif rm_type == "triton":
+        from .triton_verify import compute_score as compute_triton_score
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _code_rm_executor, partial(compute_triton_score, response, label)
+        )
+    elif rm_type == "code":
+        from .coder1 import get_coder1_reward
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _code_rm_executor, partial(get_coder1_reward, response, label, extra_info=metadata)
+        )
+    elif rm_type == "llm_judge":
+        from .llm_judge import llm_judge_reward
+        return await llm_judge_reward(args, sample)
+    elif rm_type == "self_judge":
+        from .llm_judge import self_judge_reward
+        return await self_judge_reward(args, sample)
+    elif rm_type == "llm_rubric_judge":
+        from .llm_judge import llm_rubric_judge_reward
+        return await llm_rubric_judge_reward(args, sample)
+    elif rm_type == "self_rubric_judge":
+        from .llm_judge import self_rubric_judge_reward
+        return await self_rubric_judge_reward(args, sample)
+    elif rm_type:
+        raise NotImplementedError(f"Rule-based RM for {rm_type} is not implemented.")
+    else:
+        raise NotImplementedError("Rule-based RM type is not specified.")
+
+
+async def batched_async_rm(
+    args,
+    samples: list[Sample],
+    inplace_set_reward_field: bool = False,
+    **kwargs,
+) -> list[int | float] | None:
+    if inplace_set_reward_field:
+        rewards = await batched_async_rm(args, samples, **kwargs)
+        for sample, reward in zip(samples, rewards, strict=True):
+            assert (
+                sample.reward is None
+            ), f"Overriding sample.reward from {sample.reward} to {reward}, is this intended?"
+            sample.reward = reward
+        return None
+
+    if args.custom_rm_path is not None:
+        # Ensure the custom reward function is implemented in batch mode
+        rm_function = load_function(args.custom_rm_path)
+        return await rm_function(args, samples, **kwargs)
+    tasks = [async_rm(args, sample, **kwargs) for sample in samples]
+    rewards = await asyncio.gather(*tasks)
+    return rewards

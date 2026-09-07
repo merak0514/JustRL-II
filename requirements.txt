@@ -1,0 +1,37 @@
+# Megatron (miles/backends/megatron_utils/initialize.py) asserts NumPy 1.x only
+numpy>=1.26,<2
+
+accelerate
+blobfile
+datasets
+httpx[http2]
+mcp[cli]
+memray  # needed for debugging (but is lightweight), we can put it to dev mode when using pyproject.toml
+omegaconf
+pillow
+pybase64
+pylatexenc
+pytest-asyncio
+pyyaml
+qwen_vl_utils # for VLM
+ray[default]
+ring_flash_attn; platform_system == "Linux"
+sglang-router>=0.2.3
+tensorboard
+torchft-nightly==2026.4.3; platform_system == "Linux"
+transformers
+wandb
+swanlab
+
+# Math answer verification for `--rm-type math` (deepscaler/math/dapo graders).
+# The math_verify_fallback worker imports `math_verify` directly when present;
+# MILES_MATH_VERIFY_PYTHONPATH is only needed for a vendored copy.
+math-verify==0.9.0
+
+# rlvr_ifeval (--rm-type rlvr_ifeval, verl-aligned): import opencompass.utils + open_instruct.ground_truth_utils
+mmengine>=0.10.0
+absl-py
+langdetect
+requests
+immutabledict
+nltk>=3.7
