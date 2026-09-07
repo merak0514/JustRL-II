@@ -1,6 +1,6 @@
 # Submodules / model forks
 
-The #12 pipeline reproduces against **three private forks** of public frameworks. The
+JustRL2 trains against **three private forks** of public frameworks. The
 private commits are pinned by the `gitlink` SHAs below; the forks live on the
 `codeup.aliyun.com:modelbest/scaling` internal group and are **not** public. This package
 ships the miles-side code and the Megatron patch, but **not** the forks themselves.
@@ -35,13 +35,13 @@ git -C sglang        checkout fc203f00e76e5a07d459c77a5c825cb512a237cd   # DSpar
 ### Option B — reconstruct against public upstreams + the shipped patch
 The miles-side patches are included here:
 
-- **Megatron**: `docker/patch/latest/megatron.patch` — applied by `scripts/setup/setup.sh`.
+- **Megatron**: `third_party/patches/megatron.patch` — applied by `justrl2/setup/setup.sh`.
   This is what wires miles' **scalar value-head critic** (`LinearForLastLayer`) and the
   MiniCPM5 family into Megatron. Clone NVIDIA Megatron-LM, apply the patch, and the
   `afedb9da…` fork's miles-facing behavior is recovered. The fork also carries MiniCPM5
   architecture support (dense Llama-arch with QKV GQA, RMSNorm, svg activated) — if your
   upstream lacks the MiniCPM5 config, port the `minicpm5` config/attention bits.
-- **sglang**: `docker/patch/latest/sglang.patch` mirrors the fork. The **DSpark** speculative
+- **sglang**: `third_party/patches/sglang.patch` mirrors the fork. The **DSpark** speculative
   decoding (`--sglang-speculative-algorithm DSPARK`, draft model, block size, draft window)
   is a newer fork feature than the base sglang release; to reproduce it you need the
   sglang commit `fc203f00e` (or an upstream that already merged DSpark).
@@ -50,41 +50,22 @@ The miles-side patches are included here:
   `miles/backends/megatron_utils/model_provider.py` + `megatron_bridge_utils.py`.
 
 ### Option C — minimal reconstruction (skip the forks)
-The pieces that make #12's critic work are **in the miles tree**, not the forks:
+The pieces that make the JustRL2 critic work are **in the miles tree**, not the forks:
 
 - `miles/backends/megatron_utils/model_provider.py` → `LinearForLastLayer` (scalar value
-  head, zero-init).
-- `miles/backends/megatron_utils/checkpoint.py` → `_rezero_critic_value_head` (re-zero after
+  head: zero weight, mean-reward bias).
+- `miles/backends/megatron_utils/checkpoint.py` → `_rezero_critic_value_head` (re-init after
   policy-ckpt load + fp32 master resync).
 - `miles/utils/ppo_utils.py` → length-adaptive GAE λ=k^(1/L), partial-rollout, over-sampling.
 
 If you only need to study those, you don't strictly need the forks; you need them to *run*
 the full Megatron rollout.
 
-## Model weights (public)
+## Model weights
 
-The base model is MiniCPM5-2.6B (dense, Llama-arch). #12 uses:
-
-- **HF checkpoint** (base, for the HF/`--hf-checkpoint` path)
-- **Megatron `torch_dist` checkpoint** (for `--ref-load` / `--tokenizer`; must be a `tp1`
-  torch-dist conversion)
-
-Both need to be downloadable from a public hub. Because MiniCPM5-2.6B may not be on
-HuggingFace under that exact name, treat these as "download from your model hub / ModelScope /
-HF and place in `MODELS_DIR`":
-
-```bash
-export MODELS_DIR=$PWD/models/cache
-mkdir -p "$MODELS_DIR"
-# HF  -> $MODELS_DIR/MiniCPM5-2.6B-0426-24000           (config.json + *.safetensors)
-# Mg  -> $MODELS_DIR/MiniCPM5-2.6B-0426-24000-tp1-torch-dists
-```
-
-The `run` script will refuse to start if `MODELS_DIR` is missing, so a wrong path cannot
-silently fall through to a fresh-init run.
-
-**DSpark draft model** (`DSPARK_DRAFT_MODEL_PATH`): a MiniCPM5-2.6B **Draft-5L** (5-layer
-decoder) used for speculative decoding, `block_size=7` in its config. This is also model-best
-internal; get a public-equivalent 5-layer MiniCPM5 draft or pin the DSpark draft checkpoint
-you have. Without it, leave `DSPARK_DRAFT_MODEL_PATH` empty — the DSpark block is then a
-no-op and the run is plain (non-speculative) decoding.
+`bash justrl2/prepare_model.sh` downloads `openbmb/MiniCPM5-2.6B` (HF format) and converts
+it to the Megatron `torch_dist` layout with `tools/convert_hf_to_torch_dist.py`; with
+`WITH_DSPARK=1` it also fetches the `openbmb/MiniCPM5-2.6B-DSpark-5L` draft model for
+speculative decoding. `train.sh` refuses to start if either model path is missing, so a
+typo cannot fall through to a random-init run. Always point `MEGATRON_MODEL_PATH` at the
+parent `torch_dist` directory, not an `iter_xxx` subdirectory.

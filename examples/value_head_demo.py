@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal reproduction of JustRL2 (#12)'s cc-noLM value-head critic.
+"""Minimal reproduction of JustRL2's cc-noLM value-head critic.
 
 A standalone, Megatron-free sanity check that the core piece — a *scalar value head*
 (`output_size=1`, zero-initialized) trained on GAE returns — actually learns on a toy
@@ -32,12 +32,12 @@ import time
 import torch
 
 HIDDEN = 128          # toy hidden size (real MiniCPM5-2.6B: 2048)
-# Critic LR. NOTE: for a *converging toy* we use a demonstrative 1e-3; the #12 recipe uses
+# Critic LR. NOTE: for a *converging toy* we use a demonstrative 1e-3; the real recipe uses
 # --critic-lr 5e-6 over full rollout steps (the head converges over ~30 critic-only steps).
 LR = 1e-3
 STEPS = 800
 SEQ_LEN = 32
-REWARD_MEAN = 0.52    # value target band (= the seeded prior; #12 s9 mean reward)
+REWARD_MEAN = 0.52    # value target band (= the seeded prior; the s9 mean reward)
 REWARD_STD = 0.2
 
 
@@ -57,7 +57,7 @@ class ScalarValueHead(torch.nn.Module):
         self.weight.is_embedding_or_output_parameter = True
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        # #12 keeps the value head in fp32 (`.float()` in the real forward), matching
+        # The real critic keeps the value head in fp32 (`.float()` in the real forward), matching
         # `LinearForLastLayer.forward` for the scalar path.
         return torch.nn.functional.linear(h.float(), self.weight.float(), self.bias.float())
 

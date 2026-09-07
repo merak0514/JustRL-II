@@ -21,7 +21,7 @@ if [ "${SKIP_PIP_INSTALL:-0}" != "1" ]; then
   fi
 
   pip install timeout_decorator polars seaborn
-  # math-verify is the public PyPI package used for math answer verification (#12 eval).
+  # math-verify is the public PyPI package used for math answer verification (used by the math reward).
   pip install math-verify antlr4-python3-runtime -U
   pip install grpcio grpcio-tools protobuf loguru
   pip install swanlab
@@ -44,7 +44,7 @@ fi
 if [ -f "${PATCH_MARKER}" ]; then
   echo "skip megatron.patch (marker exists: ${PATCH_MARKER})"
 else
-  patch -p1 -N --batch < "$WORK_DIR/docker/patch/latest/megatron.patch" || true
+  patch -p1 -N --batch < "$WORK_DIR/third_party/patches/megatron.patch" || true
   touch "${PATCH_MARKER}"
   echo "applied megatron.patch (created marker: ${PATCH_MARKER})"
 fi

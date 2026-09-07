@@ -55,7 +55,7 @@ def test_bf16_request_still_computed_in_fp32():
 
 
 def test_first_order_equivalence_with_old_alpha_form():
-    # #12 ran the old form with α=1.5; the equivalent k is exp(−1/1.5) ≈ 0.5134.
+    # The original run used the old form with α=1.5; the equivalent k is exp(−1/1.5) ≈ 0.5134.
     alpha = 1.5
     k = math.exp(-1.0 / alpha)
     for L in (1000, 20000, 126976):
