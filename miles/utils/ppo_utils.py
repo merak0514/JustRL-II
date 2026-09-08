@@ -571,7 +571,9 @@ def length_adaptive_lambda(k: float, response_lengths, device, dtype=torch.float
     # computing log-probs (loss.py) and the critic's value head does the same
     # (model_provider.py), so the values tensor this lambda is cast to is fp32. That is an
     # accident of two unrelated call sites, not a guarantee — this assert is the guarantee.
-    if out.numel() and (out[lam > 0] >= 1.0).any():
+    # Only k < 1 is checked: k == 1.0 is a legal setting that *means* plain GAE, so λ == 1
+    # there is the intended value, not a collapse.
+    if k < 1.0 and out.numel() and (out[lam > 0] >= 1.0).any():
         raise AssertionError(
             f"length-adaptive lambda collapsed to 1.0 under dtype={dtype}: the length-adaptive "
             f"GAE is a no-op (k={k}, max response_len={max(response_lengths)}). "

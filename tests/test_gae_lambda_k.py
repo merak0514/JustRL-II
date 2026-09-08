@@ -141,3 +141,13 @@ def test_fp32_at_128k_passes():
     """The production path: fp32 at the full context length is fine and must not raise."""
     lam = length_adaptive_lambda(0.5, [126976, 30000, 8192], device="cpu")
     assert bool((lam < 1.0).all())
+
+
+def test_k_equals_one_is_legal_and_does_not_trip_the_guard():
+    """k=1 means plain GAE, so lambda==1 is the intended value, not a bf16 collapse.
+
+    The helper's own precondition is 0 < k <= 1, and k=1 is the natural "length adaptation
+    off" ablation. The collapse guard must not turn that setting into a crash.
+    """
+    lam = length_adaptive_lambda(1.0, [126976, 8192], device="cpu")
+    assert bool((lam == 1.0).all())
