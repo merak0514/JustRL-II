@@ -20,7 +20,16 @@ HF_BASE=${HF_BASE:-openbmb/JustRL-II-base-model}
 BASE_DIR_NAME=$(basename "$HF_BASE")
 mkdir -p "$MODELS_DIR"
 
-hf download "$HF_BASE" --local-dir "$MODELS_DIR/$BASE_DIR_NAME"
+# `hf` is the current CLI; `huggingface-cli` is the pre-0.34 name. Accept either so the
+# script does not depend on how new the huggingface_hub in your image happens to be.
+if command -v hf >/dev/null 2>&1; then
+  hf download "$HF_BASE" --local-dir "$MODELS_DIR/$BASE_DIR_NAME"
+elif command -v huggingface-cli >/dev/null 2>&1; then
+  huggingface-cli download "$HF_BASE" --local-dir "$MODELS_DIR/$BASE_DIR_NAME"
+else
+  echo "FATAL: neither 'hf' nor 'huggingface-cli' found; pip install -U huggingface_hub" >&2
+  exit 1
+fi
 
 if [ -f "$MODELS_DIR/$BASE_DIR_NAME-torch_dist/latest_checkpointed_iteration.txt" ]; then
   echo "torch_dist checkpoint already exists, skipping conversion"

@@ -27,8 +27,10 @@ RUN ln -sfn /root/Megatron-LM Megatron-LM && \
     ln -sfn /sgl-workspace/sglang sglang
 
 # The image already satisfies requirements.txt; install only what the recipe adds.
+# hf_transfer backs the HF_HUB_ENABLE_HF_TRANSFER=1 below: huggingface_hub raises rather
+# than falling back when the flag is set without the package installed.
 RUN pip install --no-cache-dir -e . --no-deps && \
-    pip install --no-cache-dir "math-verify==0.9.0" "antlr4-python3-runtime"
+    pip install --no-cache-dir "math-verify==0.9.0" "antlr4-python3-runtime" "hf_transfer"
 
 # Dependencies are baked in; setup.sh only applies the Megatron patch (idempotent).
 ENV SKIP_PIP_INSTALL=1 \
