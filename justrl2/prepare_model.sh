@@ -35,6 +35,10 @@ if [ -f "$MODELS_DIR/$BASE_DIR_NAME-torch_dist/latest_checkpointed_iteration.txt
   echo "torch_dist checkpoint already exists, skipping conversion"
 else
   source justrl2/model_args/minicpm5-2b.sh
+  # The converter is a single process, but it reads WORLD_SIZE from the environment (and
+  # asserts it is <= num_layers). Pin it, or a scheduler that already exported WORLD_SIZE
+  # for the training job makes this one process configure itself for that many ranks.
+  WORLD_SIZE=1 RANK=0 LOCAL_RANK=0 \
   PYTHONPATH=.:Megatron-LM python tools/convert_hf_to_torch_dist.py \
     "${MODEL_ARGS[@]}" \
     --hf-checkpoint "$MODELS_DIR/$BASE_DIR_NAME" \

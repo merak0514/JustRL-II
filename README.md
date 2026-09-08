@@ -62,7 +62,7 @@ any of them can be overridden from the shell (`GAE_LAMBDA_K=0.4 bash justrl2/tra
 | knob                     | value | why                                                                                          |
 | ------------------------ | ----- | -------------------------------------------------------------------------------------------- |
 | `GAE_LAMBDA_K`           | 0.5   | λ_i = k^(1/L_i): constant terminal-credit fraction k at the first token regardless of length |
-| `CRITIC_VALUE_BIAS_INIT` | 0.52  | value head starts at the mean reward; removes the ~25-step warmup transient                  |
+| `CRITIC_VALUE_BIAS_INIT` | 0.52  | value head starts at the mean reward; removes the ~25-step warmup transient (measured at 0.5) |
 | `NUM_CRITIC_ONLY_STEPS`  | 30    | critic converges before the first policy update                                              |
 
 ## Without a GPU stack
@@ -95,6 +95,6 @@ Apache-2.0. See [`LICENSE`](LICENSE).
 This repository contains a modified copy of the [Miles](https://github.com/radixark/miles)
 RL framework (itself derived from [slime](https://github.com/THUDM/slime), Copyright 2025
 Zhipu AI), redistributed under the same license. Files under `miles/`, `miles_plugins/`,
-`tools/`, `tests/` and `third_party/patches/` originate there; the JustRL2 recipe adds the
-scalar value-head critic changes, the length-adaptive GAE lambda and everything under
-`justrl2/`. Model weights and datasets carry their own licenses on their Hugging Face pages.
+`tools/` and `third_party/patches/` originate there; the JustRL2 recipe adds the
+scalar value-head critic changes, the length-adaptive GAE lambda, the tests under `tests/`
+and everything under `justrl2/`. Model weights and datasets carry their own licenses on their Hugging Face pages.

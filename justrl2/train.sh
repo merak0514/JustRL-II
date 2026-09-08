@@ -88,8 +88,10 @@ CKPT_ARGS=(
 if [ "$HF_SAVE_INTERVAL" != "0" ]; then
   CKPT_ARGS+=(--save-hf "${SAVE_DIR}/hf/iter_{rollout_id:07d}" --save-hf-interval "$HF_SAVE_INTERVAL")
 fi
-# First run: no --critic-load -> the critic starts from the base model (finetune), and
-# checkpoint.py re-zeroes the value-head weight / re-seeds its bias after the load.
+# First run: --critic-load is left unset, so miles defaults it to --load (arguments.py),
+# which the finetune fallback has already pointed at --ref-load because SAVE_DIR holds no
+# latest_checkpointed_iteration.txt. The critic therefore starts from the base model and
+# checkpoint.py re-zeroes the value-head weight / re-seeds its bias after that load.
 # Resume: both actor and critic checkpoints must exist and are loaded explicitly.
 ACTOR_HAS_CKPT=$([ -f "${SAVE_DIR}/latest_checkpointed_iteration.txt" ] && echo 1 || echo 0)
 CRITIC_HAS_CKPT=$([ -f "${CRITIC_SAVE_DIR}/latest_checkpointed_iteration.txt" ] && echo 1 || echo 0)

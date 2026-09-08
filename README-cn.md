@@ -60,7 +60,7 @@ python justrl2/eval.py --model runs/justrl2_minicpm5_2b_math128k/hf/iter_0000299
 | 参数 | 值 | 作用 |
 |---|---|---|
 | `GAE_LAMBDA_K` | 0.5 | λ_i = k^(1/L_i)：无论回复多长，首 token 拿到的终端 credit 比例恒为 k |
-| `CRITIC_VALUE_BIAS_INIT` | 0.52 | value head 从平均奖励起步；消除约 25 步的 warmup 过渡期 |
+| `CRITIC_VALUE_BIAS_INIT` | 0.52 | value head 从平均奖励起步；消除约 25 步的 warmup 过渡期（消融实验用的是 0.5）|
 | `NUM_CRITIC_ONLY_STEPS` | 30 | critic 先收敛，再开始更新 policy |
 
 ## 没有 GPU 环境时能做什么
@@ -92,6 +92,6 @@ Apache-2.0，见 [`LICENSE`](LICENSE)。
 
 本仓库包含 [Miles](https://github.com/radixark/miles) RL 框架的修改副本（Miles 本身派生自
 [slime](https://github.com/THUDM/slime)，Copyright 2025 Zhipu AI），以相同许可再分发。
-`miles/`、`miles_plugins/`、`tools/`、`tests/`、`third_party/patches/` 下的文件来自上游；
-JustRL2 配方新增的是标量 value head critic 相关改动、长度自适应 GAE λ，以及 `justrl2/`
-下的全部内容。模型权重与数据集以各自 Hugging Face 页面上的许可为准。
+`miles/`、`miles_plugins/`、`tools/`、`third_party/patches/` 下的文件来自上游；
+JustRL2 配方新增的是标量 value head critic 相关改动、长度自适应 GAE λ、`tests/` 下的测试，
+以及 `justrl2/` 下的全部内容。模型权重与数据集以各自 Hugging Face 页面上的许可为准。

@@ -25,7 +25,8 @@ with the SGLang engines.
 ## 2. Value-head init: zero weight, bias = expected mean reward — re-applied after load
 
 **Construction.** For the scalar head the weight is zero-initialised and the bias is filled
-with `--critic-value-bias-init` (0.52 in the released config). With a zero weight, `V ≡ bias`
+with `--critic-value-bias-init` (0.52 in the released config; the ablation that measured the
+effect used 0.5 — see docs/reproduce.md). With a zero weight, `V ≡ bias`
 at step 0, so the bias *is* the critic's prior.
 
 Why not the usual `N(0, 0.02)` weight: on a 2048-wide hidden state that gives
