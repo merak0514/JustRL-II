@@ -25,7 +25,7 @@ hf download "$HF_BASE" --local-dir "$MODELS_DIR/$BASE_DIR_NAME"
 if [ -f "$MODELS_DIR/$BASE_DIR_NAME-torch_dist/latest_checkpointed_iteration.txt" ]; then
   echo "torch_dist checkpoint already exists, skipping conversion"
 else
-  source justrl2/model_args/minicpm-2b.sh
+  source justrl2/model_args/minicpm5-2b.sh
   PYTHONPATH=.:Megatron-LM python tools/convert_hf_to_torch_dist.py \
     "${MODEL_ARGS[@]}" \
     --hf-checkpoint "$MODELS_DIR/$BASE_DIR_NAME" \

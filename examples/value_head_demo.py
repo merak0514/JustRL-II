@@ -31,7 +31,7 @@ import time
 
 import torch
 
-HIDDEN = 128          # toy hidden size (real MiniCPM-2B: 2048)
+HIDDEN = 128          # toy hidden size (real MiniCPM5-2B: 2048)
 # Critic LR. NOTE: for a *converging toy* we use a demonstrative 1e-3; the real recipe uses
 # --critic-lr 5e-6 over full rollout steps (the head converges over ~30 critic-only steps).
 LR = 1e-3

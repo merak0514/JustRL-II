@@ -2,7 +2,7 @@
 
 # JustRL2
 
-**面向 128k 长上下文数学推理的 PPO：无 LM 头的 critic、按平均奖励初始化的 value head、长度自适应的 GAE λ —— MiniCPM-2B 配方、代码、数据与权重。**
+**面向 128k 长上下文数学推理的 PPO：无 LM 头的 critic、按平均奖励初始化的 value head、长度自适应的 GAE λ —— MiniCPM5-2B 配方、代码、数据与权重。**
 
 [English](README.md) · [博客](https://panhaoxuan.notion.site/justrl-ii-small-llms-to-128k-reasoning-with-a-critic-cn) · [Blog (EN)](https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic)
 
@@ -22,7 +22,7 @@ justrl2/                   配方层 —— 所有 JustRL2 专属内容
   prepare_data.py          Hugging Face -> jsonl
   prepare_model.sh         Hugging Face -> HF 权重 + Megatron torch_dist 权重
   eval.py                  对 HF 导出权重做离线 AIME 评测
-  model_args/, setup/      MiniCPM-2B 的 Megatron 参数；env / ray / 安装辅助脚本
+  model_args/, setup/      MiniCPM5-2B 的 Megatron 参数；env / ray / 安装辅助脚本
 miles/, train.py           框架层（Miles fork；见 third_party/README.md）
 third_party/               Megatron-LM / SGLang：社区镜像说明，及用于原版 Megatron 的 patch
 Dockerfile                 FROM radixark/miles:dev（预装 Megatron-LM + SGLang + TE）
@@ -43,14 +43,14 @@ bash   justrl2/prepare_model.sh          # -> ./models
 python justrl2/prepare_data.py           # -> ./datasets
 
 # 2. 训练（参考实验为 16 节点 x 8 卡；每个节点都执行）
-bash justrl2/train.sh justrl2/configs/minicpm-2b-math-128k.env
+bash justrl2/train.sh justrl2/configs/minicpm5-2b-math-128k.env
 
 # 3. 评测某个导出的 checkpoint
-python justrl2/eval.py --model runs/justrl2_minicpm_2b_math128k/hf/iter_0000299 \
+python justrl2/eval.py --model runs/justrl2_minicpm5_2b_math128k/hf/iter_0000299 \
     --data datasets/aime-2025.jsonl --data datasets/aime-2026.jsonl --n 16
 ```
 
-所有超参都在 [`justrl2/configs/minicpm-2b-math-128k.env`](justrl2/configs/minicpm-2b-math-128k.env)；任何一项都可以从 shell 覆盖（`GAE_LAMBDA_K=0.4 bash justrl2/train.sh …`），不必改文件。
+所有超参都在 [`justrl2/configs/minicpm5-2b-math-128k.env`](justrl2/configs/minicpm5-2b-math-128k.env)；任何一项都可以从 shell 覆盖（`GAE_LAMBDA_K=0.4 bash justrl2/train.sh …`），不必改文件。
 
 ## 最关键的三个数
 

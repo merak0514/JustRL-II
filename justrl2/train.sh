@@ -1,8 +1,8 @@
 #!/bin/bash
-# JustRL2 launcher: MiniCPM-2B math RL with a scalar value-head critic,
+# JustRL2 launcher: MiniCPM5-2B math RL with a scalar value-head critic,
 # length-adaptive GAE (lambda_i = k^(1/L_i)) and a mean-reward-seeded value head.
 #
-#   bash justrl2/train.sh justrl2/configs/minicpm-2b-math-128k.env [extra miles args...]
+#   bash justrl2/train.sh justrl2/configs/minicpm5-2b-math-128k.env [extra miles args...]
 #
 # All knobs live in the .env file (every line there is a default that an exported
 # shell variable overrides). This script only turns them into miles arguments and
@@ -36,7 +36,7 @@ export SGLANG_PATH=${WORK_DIR}/sglang
 # EXTRA_PYTHONPATH: optional extra entries (e.g. a HF dynamic-modules cache for checkpoints
 # that ship custom modeling code); appended for the driver and every Ray worker.
 export PYTHONPATH=.:Megatron-LM:${SGLANG_PATH}/python${EXTRA_PYTHONPATH:+:$EXTRA_PYTHONPATH}
-source justrl2/model_args/minicpm-2b.sh
+source justrl2/model_args/minicpm5-2b.sh
 
 # ---- topology: PPO needs actor and critic world sizes equal (rank-pairwise NCCL groups) ----
 ACTOR_NUM_NODES=${ACTOR_NUM_NODES:-$((WORLD_SIZE / 2))}
@@ -67,6 +67,15 @@ export TENSORBOARD_DIR=${TENSORBOARD_DIR:-${SAVE_DIR}/tensorboard}
 export SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-${SAVE_DIR}/swanlog}
 mkdir -p "$TENSORBOARD_DIR" "$SWANLAB_LOG_DIR"
 
+# Rotation: Megatron keeps the latest torch_dist checkpoint plus every iteration that is a
+# multiple of --save-retain-interval, and rotates the rest away. Rollout ids are 0-based
+# (iter_0000009/19/...), so a retain interval that is a large multiple of SAVE_INTERVAL never
+# hits a milestone and exactly one actor + one critic checkpoint stays on disk — 63 GB total
+# here, instead of 63 GB per save. Long-term archiving is the HF export below, not this.
+# Megatron asserts save_retain_interval % save_interval == 0 on a fresh start; fail early
+# with a readable message instead of dying inside argument validation an hour into the queue.
+[ $((SAVE_RETAIN_INTERVAL % SAVE_INTERVAL)) -eq 0 ] \
+  || { echo "FATAL: SAVE_RETAIN_INTERVAL=$SAVE_RETAIN_INTERVAL must be a multiple of SAVE_INTERVAL=$SAVE_INTERVAL" >&2; exit 1; }
 CKPT_ARGS=(
   --hf-checkpoint "$HF_MODEL_DIR"
   --ref-load "$MEGATRON_MODEL_PATH"
@@ -76,14 +85,6 @@ CKPT_ARGS=(
   --save-retain-interval "$SAVE_RETAIN_INTERVAL"
   --critic-save "$CRITIC_SAVE_DIR"
 )
-# Rotation: Megatron keeps only the latest torch_dist checkpoint plus the iterations that
-# are multiples of --save-retain-interval. Rollout ids are 0-based (iter_0000009/19/...),
-# so a retain interval that is a large multiple of SAVE_INTERVAL never hits a milestone and
-# exactly one actor + one critic checkpoint stays on disk (63 GB here instead of 63 GB per
-# save). Long-term archiving is the HF export below. Megatron asserts
-# save_retain_interval % save_interval == 0 on a fresh start, hence the default below.
-[ $((SAVE_RETAIN_INTERVAL % SAVE_INTERVAL)) -eq 0 ] \
-  || { echo "FATAL: SAVE_RETAIN_INTERVAL=$SAVE_RETAIN_INTERVAL must be a multiple of SAVE_INTERVAL=$SAVE_INTERVAL" >&2; exit 1; }
 if [ "$HF_SAVE_INTERVAL" != "0" ]; then
   CKPT_ARGS+=(--save-hf "${SAVE_DIR}/hf/iter_{rollout_id:07d}" --save-hf-interval "$HF_SAVE_INTERVAL")
 fi
