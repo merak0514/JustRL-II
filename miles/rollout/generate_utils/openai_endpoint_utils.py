@@ -105,10 +105,6 @@ def compute_samples_from_openai_records(
     instead of re-decoding, but we must first trim "trailing tokens" — stop
     tokens the model emitted that the chat template also renders as the next
     turn's delimiter — to avoid double-counting.
-
-    See ``TestTITOTrailingTokenTrim`` in
-    ``tests/fast/rollout/generate_utils/test_openai_endpoint_utils.py``
-    for a concrete worked example with token-level walkthroughs.
     """
     samples = []
     cursor = 0
