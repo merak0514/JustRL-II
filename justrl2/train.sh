@@ -73,8 +73,17 @@ CKPT_ARGS=(
   --load "$SAVE_DIR"
   --save "$SAVE_DIR"
   --save-interval "$SAVE_INTERVAL"
+  --save-retain-interval "$SAVE_RETAIN_INTERVAL"
   --critic-save "$CRITIC_SAVE_DIR"
 )
+# Rotation: Megatron keeps only the latest torch_dist checkpoint plus the iterations that
+# are multiples of --save-retain-interval. Rollout ids are 0-based (iter_0000009/19/...),
+# so a retain interval that is a large multiple of SAVE_INTERVAL never hits a milestone and
+# exactly one actor + one critic checkpoint stays on disk (63 GB here instead of 63 GB per
+# save). Long-term archiving is the HF export below. Megatron asserts
+# save_retain_interval % save_interval == 0 on a fresh start, hence the default below.
+[ $((SAVE_RETAIN_INTERVAL % SAVE_INTERVAL)) -eq 0 ] \
+  || { echo "FATAL: SAVE_RETAIN_INTERVAL=$SAVE_RETAIN_INTERVAL must be a multiple of SAVE_INTERVAL=$SAVE_INTERVAL" >&2; exit 1; }
 if [ "$HF_SAVE_INTERVAL" != "0" ]; then
   CKPT_ARGS+=(--save-hf "${SAVE_DIR}/hf/iter_{rollout_id:07d}" --save-hf-interval "$HF_SAVE_INTERVAL")
 fi
@@ -206,6 +215,21 @@ EVAL_ARGS=(
   --n-samples-per-eval-prompt "$N_SAMPLES_PER_EVAL_PROMPT"
 )
 
+# ---- post-hoc analysis dumps -------------------------------------------------------
+# DUMP_DIR unset (the default) means no dump at all. When set, miles derives
+# rollout_data/{rollout_id}.pt (per-sample trajectories: prompt, response, reward) and
+# train_data/{rollout_id}_{rank}.pt (per-token values, advantages, returns, log-probs)
+# from --dump-details, and the same directory receives the IcePop/TIS scatter samples.
+# Budget: ~1 GB per step for the two data dumps at this batch/length, plus ~0.5 GB per
+# step of policy_loss_debug, which every rank writes on every microbatch and which is the
+# one subdirectory that is safe to delete afterwards.
+DUMP_ARGS=()
+if [ -n "$DUMP_DIR" ]; then
+  mkdir -p "$DUMP_DIR"
+  DUMP_ARGS+=(--dump-details "$DUMP_DIR" --icepop-dump-dir "$DUMP_DIR")
+  [ -n "$ICEPOP_DUMP_STEPS" ] && DUMP_ARGS+=(--icepop-dump-steps $ICEPOP_DUMP_STEPS)
+fi
+
 TRACK_ARGS=(--use-tensorboard)
 [ "$USE_WANDB" = 1 ] && TRACK_ARGS+=(--use-wandb --wandb-project "${WANDB_PROJECT:-justrl2}")
 # The project name is read from MILES_SWANLAB_PROJECT, not SWANLAB_PROJECT: the swanlab SDK
@@ -238,7 +262,7 @@ echo "============================================================"
 echo "JustRL2  exp=${EXP_NAME}"
 echo "actor ${ACTOR_NUM_NODES}x${ACTOR_NUM_GPUS_PER_NODE}  critic ${CRITIC_NUM_NODES}x${CRITIC_NUM_GPUS_PER_NODE}  TP${TENSOR_MODEL_PARALLEL_SIZE} CP${CONTEXT_PARALLEL_SIZE}  GBS=${GLOBAL_BATCH_SIZE}"
 echo "k=${GAE_LAMBDA_K}  bias_init=${CRITIC_VALUE_BIAS_INIT}  critic_only=${NUM_CRITIC_ONLY_STEPS}  exclude_olp=${CRITIC_EXCLUDE_OLP}"
-echo "save=${SAVE_DIR}"
+echo "save=${SAVE_DIR}  retain=${SAVE_RETAIN_INTERVAL}  dump=${DUMP_DIR:-off}"
 echo "============================================================"
 
 ray job submit --address="http://${MASTER_ADDR}:8265" \
@@ -252,7 +276,7 @@ ray job submit --address="http://${MASTER_ADDR}:8265" \
   --skip-eval-before-train \
   "${MODEL_ARGS[@]}" "${CKPT_ARGS[@]}" "${ROLLOUT_ARGS[@]}" "${PPO_ARGS[@]}" \
   "${OPTIMIZER_ARGS[@]}" "${PERF_ARGS[@]}" "${SGLANG_ARGS[@]}" "${EVAL_ARGS[@]}" \
-  "${TRACK_ARGS[@]}" "$@"
+  "${DUMP_ARGS[@]}" "${TRACK_ARGS[@]}" "$@"
 
 bash justrl2/setup/ray_end.sh
 echo "JustRL2 done: ${EXP_NAME}"

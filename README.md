@@ -12,7 +12,7 @@ head and a length-adaptive GAE λ — MiniCPM-2B recipe, code, data and weights.
 - **Blog**: [JustRL-II: Scaling Small LLMs to 128k Reasoning with a Critic](https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic) — the full write-up, experiments and ablations this code implements.
 - **Method**: [`docs/method.md`](docs/method.md) — what each piece does and where it lives.
 - **Reproduce**: [`docs/reproduce.md`](docs/reproduce.md) — topology, launch, resume, eval.
-- **Data**: [`docs/data.md`](docs/data.md) — the s9 training set and AIME eval sets.
+- **Data**: [`docs/data.md`](docs/data.md) — the UltraData-RL-Math-2609 training set and AIME eval sets.
 
 ## Layout
 

@@ -65,7 +65,7 @@ class LinearForLastLayer(torch.nn.Linear):
         if bias:
             # JustRL2: with a zero weight V == bias at step 0, so the bias is the
             # critic's prior. Seeding it at the expected mean reward
-            # (--critic-value-bias-init, 0.52 for the s9 math mix) makes the value
+            # (--critic-value-bias-init, 0.52 for the math training mix) makes the value
             # loss open at ~Var(r) instead of ~E[r^2] and keeps the first critic
             # gradient norm ~3x smaller; with 0 the head spends its first ~25 steps
             # learning the offset while the policy already updates against it.
