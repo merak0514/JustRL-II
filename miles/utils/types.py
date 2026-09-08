@@ -69,8 +69,18 @@ class Sample:
             return self.completion_token_num / self.spec_verify_ct if self.spec_verify_ct > 0 else 0.0
 
         def add(self, meta_info: dict):
-            self.spec_accept_token_num += meta_info.get("spec_accept_token_num", 0)
-            self.spec_draft_token_num += meta_info.get("spec_draft_token_num", 0)
+            # SGLang names these spec_num_correct_drafts / spec_num_proposed_drafts
+            # (tokenizer_manager.collect_metrics); the older spec_accept_token_num /
+            # spec_draft_token_num spelling is kept as a fallback for engines that
+            # still emit it. Reading only the old names silently yields accept_rate 0
+            # while accept_length looks fine, since that one is derived from
+            # spec_verify_ct + completion_tokens.
+            self.spec_accept_token_num += meta_info.get(
+                "spec_num_correct_drafts", meta_info.get("spec_accept_token_num", 0)
+            )
+            self.spec_draft_token_num += meta_info.get(
+                "spec_num_proposed_drafts", meta_info.get("spec_draft_token_num", 0)
+            )
             self.spec_verify_ct += meta_info.get("spec_verify_ct", 0)
             self.completion_token_num += meta_info.get("completion_tokens", 0)
 
