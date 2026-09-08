@@ -13,14 +13,16 @@ The Hub schema is `{uuid, query, ground_truth, source, domain}`; miles expects
 `label` (the reference answer, graded by the `math` reward with math-verify as a
 fallback). The mapping is done here, and the original columns are preserved.
 
-Evaluation sets (AIME 2024 / 2025 / 2026) are public benchmarks that are not part of
-this dataset — see `--eval-repo` below and docs/data.md.
+The evaluation sets (AIME 2025 and 2026, 30 problems each) ship with this repo under
+`justrl2/data/` and are copied into the data dir by default; `--eval-repo` overrides
+them with a Hub dataset. See docs/data.md.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 TRAIN_REPO = "openbmb/UltraData-RL-2609"
@@ -60,26 +62,28 @@ def main() -> None:
     ap.add_argument(
         "--eval-repo",
         default=None,
-        help="optional HF dataset with AIME-style eval problems; needs --eval-splits. "
-        "Not set by default: supply your own aime-20XX.jsonl (see docs/data.md).",
+        help="optional HF dataset to pull eval problems from instead of the bundled "
+        "AIME 2025/2026 sets; needs --eval-splits",
     )
     ap.add_argument(
         "--eval-splits",
-        default="aime2024,aime2025,aime2026",
+        default="aime2025,aime2026",
         help="comma-separated splits (or configs) to pull from --eval-repo",
     )
     ap.add_argument("--skip-train", action="store_true")
     args = ap.parse_args()
 
-    from datasets import load_dataset
-
     out = Path(args.data_dir)
     if not args.skip_train:
+        from datasets import load_dataset
+
         ds = load_dataset(args.train_repo, args.train_config, split="train")
         n = _dump(ds, out / args.out_name, args.prompt_key, args.label_key)
         print(f"train: {n} rows -> {out / args.out_name}")
 
     if args.eval_repo:
+        from datasets import load_dataset
+
         for split in [s.strip() for s in args.eval_splits.split(",") if s.strip()]:
             try:
                 ds = load_dataset(args.eval_repo, split=split)
@@ -89,11 +93,15 @@ def main() -> None:
             n = _dump(ds, out / fname, args.prompt_key, args.label_key)
             print(f"{split}: {n} rows -> {out / fname}")
     else:
-        print(
-            "\neval: not downloaded (no --eval-repo). train.sh expects AIME jsonl files\n"
-            f"      at {out}/aime-2024.jsonl, aime-2025.jsonl, aime-2026.jsonl with the\n"
-            "      same prompt/label fields — see docs/data.md."
-        )
+        # AIME 2025 and 2026 ship with the repo (30 problems each, prompt/label jsonl):
+        # they are what the reported acc@16 numbers are computed on, so copy them next to
+        # the training set rather than making the reader hunt for a matching Hub mirror.
+        bundled = Path(__file__).resolve().parent / "data"
+        out.mkdir(parents=True, exist_ok=True)
+        for src in sorted(bundled.glob("aime-*.jsonl")):
+            shutil.copyfile(src, out / src.name)
+            n = sum(1 for line in src.open() if line.strip())
+            print(f"{src.stem}: {n} rows -> {out / src.name}  (bundled)")
 
     print(f"\nexport DATA_DIR={out.resolve()}    # train.sh defaults derive from this")
 

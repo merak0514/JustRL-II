@@ -37,22 +37,22 @@ produce a learning signal. Labels are never modified by that filtering.
 If you swap in your own corpus, the property to preserve is that one: drop what the
 starting checkpoint already solves every time, keep the mixed band.
 
-## Evaluation — AIME 2024 / 2025 / 2026
+## Evaluation — AIME 2025 / 2026
 
 The eval sets are public competition benchmarks and are **not** part of
-UltraData-RL-2609, so `prepare_data.py` does not download them by default. Provide three
-jsonl files with the same `prompt` / `label` fields:
+UltraData-RL-2609, so they ship with this repo instead — 30 problems each, in the same
+`prompt` / `label` format:
 
 ```
-<data-dir>/aime-2024.jsonl
-<data-dir>/aime-2025.jsonl
-<data-dir>/aime-2026.jsonl
+justrl2/data/aime-2025.jsonl
+justrl2/data/aime-2026.jsonl
 ```
 
-and `train.sh` picks them up (`TEST_FILE="aime2024 … aime2025 … aime2026 …"`). Several
-AIME sets are mirrored on the Hub; if the one you use is laid out as splits or configs of
-a single repo, `prepare_data.py --eval-repo <repo> --eval-splits aime2024,aime2025,aime2026`
-converts them for you. The reported numbers use 30 problems per year, 16 samples per
+`python justrl2/prepare_data.py` copies them to `<data-dir>/aime-2025.jsonl` and
+`<data-dir>/aime-2026.jsonl`, where `train.sh` picks them up
+(`TEST_FILE="aime2025 … aime2026 …"`). To evaluate on a different set instead, point
+`prepare_data.py --eval-repo <repo> --eval-splits <a,b>` at a Hub dataset laid out as
+splits or configs. The reported numbers use 30 problems per year, 16 samples per
 problem, T=1.0, top-p 0.95, 126976-token budget (`justrl2/eval.py`).
 
 ## Using your own data

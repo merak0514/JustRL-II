@@ -63,7 +63,7 @@ exports (`SAVE_ROOT/EXP_TAG/hf/iter_XXXXXXX`, every 5 steps) offline:
 
 ```bash
 python justrl2/eval.py --model runs/<EXP_TAG>/hf/iter_0000299 \
-    --data datasets/aime-2024.jsonl --data datasets/aime-2025.jsonl --data datasets/aime-2026.jsonl \
+    --data datasets/aime-2025.jsonl --data datasets/aime-2026.jsonl \
     --n 16 --temperature 1.0 --top-p 0.95 --max-tokens 126976
 ```
 

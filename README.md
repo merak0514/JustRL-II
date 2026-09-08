@@ -21,6 +21,7 @@ justrl2/                   the recipe — everything JustRL2-specific
   configs/*.env            all knobs with defaults (release + 1-node debug)
   train.sh                 launcher: .env -> miles arguments -> Ray job
   prepare_data.py          Hugging Face -> jsonl
+  data/aime-20{25,26}.jsonl  the AIME eval sets the reported numbers use (30 problems each)
   prepare_model.sh         Hugging Face -> HF ckpt + Megatron torch_dist ckpt
   eval.py                  offline AIME eval of an HF export
   model_args/, setup/      MiniCPM5-2B Megatron args; env / ray / setup helpers

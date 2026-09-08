@@ -20,11 +20,12 @@ justrl2/                   配方层 —— 所有 JustRL2 专属内容
   configs/*.env            全部超参及默认值（发布配置 + 单机调试配置）
   train.sh                 启动器：.env -> miles 参数 -> Ray job
   prepare_data.py          Hugging Face -> jsonl
+  data/aime-20{25,26}.jsonl  论文数字所用的 AIME 评测集（每年 30 题）
   prepare_model.sh         Hugging Face -> HF 权重 + Megatron torch_dist 权重
   eval.py                  对 HF 导出权重做离线 AIME 评测
   model_args/, setup/      MiniCPM5-2B 的 Megatron 参数；env / ray / 安装辅助脚本
 miles/, train.py           框架层（Miles fork；见 third_party/README.md）
-third_party/               Megatron-LM / SGLang：社区镜像说明，及用于原版 Megatron 的 patch
+third_party/               Megatron-LM / SGLang：如何获取（社区镜像或 git clone）
 Dockerfile                 FROM radixark/miles:dev（预装 Megatron-LM + SGLang + TE）
 tools/                     HF <-> torch_dist 转换脚本
 examples/value_head_demo.py   CPU 玩具实验：value head bias 初始化 0 vs 0.52
