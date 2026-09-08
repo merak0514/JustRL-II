@@ -1,11 +1,13 @@
 """
-线程池 + 批次上下文模块
+Thread pool + batch context.
 
-全局 ThreadPoolExecutor 单例提供自然并发限流（固定线程数 = 固定最大 firejail 并发数）。
-BatchContext 跟踪每批评测的活跃子进程，fail-fast 时主动 kill 残留 firejail 进程。
+A global ThreadPoolExecutor singleton provides natural concurrency limiting
+(fixed thread count = fixed max number of concurrent firejail processes).
+BatchContext tracks the live subprocesses of each evaluation batch and kills
+leftover firejail processes on fail-fast.
 
-环境变量：
-  CODER1_MAX_WORKERS  线程池大小（默认 8）
+Environment variables:
+  CODER1_MAX_WORKERS  thread pool size (default 8)
 """
 import os
 import signal
@@ -47,10 +49,10 @@ def get_global_executor() -> ThreadPoolExecutor:
 
 class BatchContext:
     """
-    每次 _compute_score 调用的上下文，跟踪该批次活跃的子进程。
-    fail-fast 时调用 cancel_all()：
-      1. 设置 cancel_event → 阻止尚未启动的任务调用 code_exec
-      2. kill 所有已注册的活跃子进程 → 被 communicate() 阻塞的线程立即释放
+    Per-_compute_score-call context tracking that batch's live subprocesses.
+    On fail-fast, cancel_all():
+      1. sets cancel_event → keeps not-yet-started tasks from calling code_exec
+      2. kills every registered live subprocess → threads blocked in communicate() return at once
     """
 
     def __init__(self):

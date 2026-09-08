@@ -197,7 +197,7 @@ def diagnose_metrics(
 ) -> Diagnosis:
     steps = [metrics[k] for k in sorted(metrics)]
     if not steps:
-        return Diagnosis(None, "no_data", "low", ["没有解析到可用指标。"], ["先启用训练日志或 debug rollout dump。"])
+        return Diagnosis(None, "no_data", "low", ["No usable metrics were parsed."], ["Enable training logs or a debug rollout dump first."])
 
     if collapse_step is None:
         collapse_step = _find_collapse_step(steps, reward_floor, reward_drop_ratio)
@@ -288,7 +288,7 @@ def diagnose_metrics(
         if previous_entropy and statistics.mean(previous_entropy) > 0 and entropy < statistics.mean(previous_entropy) * 0.5:
             scores["entropy_or_mode_collapse"] += 3
     else:
-        evidence.append("没有解析到非零 entropy 曲线，无法把问题直接定性为熵崩塌。")
+        evidence.append("No non-zero entropy curve was parsed; cannot attribute the failure to entropy collapse directly.")
 
     if not scores:
         scores["unknown_or_needs_samples"] += 1
@@ -301,37 +301,37 @@ def diagnose_metrics(
 def _recommendations(cause: str) -> list[str]:
     if cause == "grpo_signal_starvation":
         return [
-            "启用或保留 mixed-group dynamic sampling，目标是 grpo_metrics/effective_ratio 长期高于 0.75。",
-            "对长期 all-pass/all-fail prompt 做难度分桶或移出当前训练池。",
-            "保留 stop-on-no-grad early stop，避免在无梯度 batch 上继续更新。",
+            "Enable or keep mixed-group dynamic sampling, targeting grpo_metrics/effective_ratio above 0.75 over the long run.",
+            "Bucket persistently all-pass/all-fail prompts by difficulty, or drop them from the current training pool.",
+            "Keep the stop-on-no-grad early stop so updates don't continue on zero-gradient batches.",
         ]
     if cause == "length_truncation_feedback":
         return [
-            "把 response length、truncated_ratio 纳入 kill-switch；cliff 前先回滚 checkpoint。",
-            "加入软长度惩罚或截断惩罚，避免 binary reward 在长 CoT 截断时突然变成全 0。",
-            "降低 late-stage LR/temperature/entropy_coef，或用分段 schedule 在高 reward 后降探索。",
+            "Put response length and truncated_ratio in the kill-switch; roll back to a pre-cliff checkpoint first.",
+            "Add a soft length or truncation penalty so binary reward doesn't drop to all-zero the moment long CoT gets truncated.",
+            "Lower late-stage LR/temperature/entropy_coef, or use a staged schedule that reduces exploration once reward is high.",
         ]
     if cause == "kl_ratio_update_instability":
         return [
-            "降低 LR 或缩短每个 rollout 的 actor 更新幅度，并加 target-KL/clipfrac 阈值。",
-            "长响应优先 A/B GSPO，减少 token-level ratio 在 16k response 上的方差。",
-            "继续监控 train_rollout_logprob_abs_diff；异常时检查 rollout/train logprob 对齐。",
+            "Lower the LR or shrink the actor update per rollout, and add target-KL/clipfrac thresholds.",
+            "A/B GSPO first for long responses, to cut token-level ratio variance on 16k responses.",
+            "Keep monitoring train_rollout_logprob_abs_diff; if it spikes, check rollout/train logprob alignment.",
         ]
     if cause == "reward_or_env_pipeline":
         return [
-            "先修 reward parser/sandbox/env_error，不要先调算法参数。",
-            "dump env_error 样本并分桶统计错误原因、超时和无效格式。",
-            "给 reward 服务加熔断和重试上限，避免错误样本进入训练。",
+            "Fix the reward parser/sandbox/env_error first; don't touch algorithm hyperparameters yet.",
+            "Dump env_error samples and bucket them by failure reason, timeout, and invalid format.",
+            "Add a circuit breaker and a retry cap to the reward service so failed samples don't reach training.",
         ]
     if cause == "entropy_or_mode_collapse":
         return [
-            "加入 entropy/top1/unique-response 监控，确认是真正分布收缩而不是 reward 表观归零。",
-            "增加 entropy bonus 或 temperature 的同时观察 truncation，避免更长 CoT 反向伤害 reward。",
-            "必要时加入 KL-to-reference 或行为克隆混合，防止策略远离可用基座。",
+            "Add entropy/top1/unique-response monitoring to confirm the distribution is really contracting rather than reward merely appearing to go to zero.",
+            "Watch truncation while raising the entropy bonus or temperature, so longer CoT doesn't hurt reward instead.",
+            "If needed, mix in KL-to-reference or behaviour cloning to keep the policy from drifting away from a usable base.",
         ]
     return [
-        "补齐 debug rollout dump，并从 cliff 前 checkpoint 固定 seed 复现 3-5 个 rollout。",
-        "优先验证 reward 管道、长度/truncation、GRPO group 方差，再调 entropy。",
+        "Collect a debug rollout dump, and reproduce 3-5 rollouts with a fixed seed from the pre-cliff checkpoint.",
+        "Verify the reward pipeline, length/truncation, and GRPO group variance before tuning entropy.",
     ]
 
 

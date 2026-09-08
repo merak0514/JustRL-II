@@ -204,7 +204,7 @@ class TestQwen3_5BridgeALogOverride:
 
 class TestALogLoadPathEndToEnd:
     """Replays the dtype-relevant subset of ``Bridge.load_weights`` on a toy
-    model, as documented in ``tools/debug_a_log_old_flow.py``. No distributed
+    model. No distributed
     or real safetensor IO — only the two cast points we care about.
 
     Expected outcome: HF fp32 value lands in the Megatron A_log param

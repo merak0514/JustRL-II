@@ -235,7 +235,7 @@ def local_response_to_full(
     qkv_format: str = "thd",
     max_seq_len: int | None = None,
 ) -> torch.Tensor:
-    """把本 CP rank 的局部 response 分片放回全长 response 坐标（缺失位置补零，不做通信）。"""
+    """Scatter this CP rank's local response shard back into full-length response coordinates (missing positions zero-filled, no communication)."""
     _, _, logits_offset, _ = get_logits_and_tokens_offset_with_cp(
         total_length, response_length, qkv_format, max_seq_len
     )

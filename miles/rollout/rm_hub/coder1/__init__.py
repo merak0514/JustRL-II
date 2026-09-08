@@ -144,7 +144,7 @@ def _compute_score(
             )
             if not fn_name:
                 print("fn_name not found")
-                reward_log.append("检测到 class Solution-但 extra_info[fn_name]不存在")
+                reward_log.append("found class Solution but extra_info[fn_name] is missing")
                 return 0.0, "\n".join(reward_log), "fn_name not found"
             exec_code = build_solution_call_wrapper(solution_code, fn_name)
 
@@ -230,7 +230,7 @@ def _compute_score(
 
 def _compute_score_eval(solution_str, ground_truth, extra_info=None, fail_fast=True):
     """
-    对代码解决方案进行测试用例评估，返回详细的测试结果。
+    Run the code solution against the test cases and return detailed results.
     Returns: dict with result (1/0), detail list, log list
     """
     if extra_info is None:
@@ -260,7 +260,7 @@ def _compute_score_eval(solution_str, ground_truth, extra_info=None, fail_fast=T
             result["log"].append(log_entry)
     else:
         result["detail"] = [0] * total_cases
-        result["log"] = [str(case_log)] if case_log else ["执行失败"]
+        result["log"] = [str(case_log)] if case_log else ["execution failed"]
 
     return result
 
@@ -334,9 +334,9 @@ def compute_score_debug(
 
 def get_coder1_reward(response, label, extra_info=None, format_reward=0.0, answer_reward=1.0):
     """
-    miles RL 框架的 code verifier 入口。
-    默认 format_reward=0.0, answer_reward=1.0，与 retool.py 的调用方式一致。
-    设置 MINICPM5_TIR=1 使用 TIR 模式代码提取。
+    Code verifier entry point for the miles RL framework.
+    Defaults to format_reward=0.0, answer_reward=1.0, matching how retool.py calls it.
+    Set MINICPM5_TIR=1 to use TIR-mode code extraction.
     """
     os.environ["MINICPM5_TIR"] = "1"
     try:

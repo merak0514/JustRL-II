@@ -9,7 +9,7 @@ if [ "${SKIP_PIP_INSTALL:-0}" != "1" ]; then
   # Default to the public PyPI; override with PIP_INDEX_URL (e.g. a mirror) for your cluster.
   pip config set global.index-url "${PIP_INDEX_URL:-https://pypi.org/simple}"
 
-  # sglang-kernel >= 0.3.20 is required by the sglang fork (see models/sglang/README.md).
+  # sgl-kernel >= 0.3.20 is required by the SGLang build this recipe runs against.
   cur_sgl_ver=$(pip show sgl-kernel 2>/dev/null | awk '/^Version:/{print $2}')
   if [ -z "$cur_sgl_ver" ]; then
     cur_sgl_ver=$(pip show sglang-kernel 2>/dev/null | awk '/^Version:/{print $2}')

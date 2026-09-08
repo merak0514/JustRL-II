@@ -1,11 +1,7 @@
 """Boot a real ``miles`` rollout pipeline + run the multi-role TITO driver.
 
-Used by both consumers:
-
-- pytest e2e: ``tests/e2e/sglang/test_session_server_multi_role.py``
-- CLI: ``scripts/tools/verify_session_tito_tokenizer.py``
-
-Both forms run the same ``execute_train(--debug-rollout-only)`` path: full miles
+Used by the pytest e2e suite
+(``tests/e2e/sglang/test_session_server_multi_role.py``), which runs the same ``execute_train(--debug-rollout-only)`` path: full miles
 pipeline (sglang + miles-router with session support) is launched, ``train`` is
 skipped, and the rollout drives ``session_verify_agent.run_agent`` against the
 session server.

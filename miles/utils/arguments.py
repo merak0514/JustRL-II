@@ -1155,13 +1155,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--custom-tis-function-path",
                 type=str,
                 default=None,
-                help="Path to the custom TIS/RS function (e.g., examples/train_infer_mismatch_helper/mis.py:compute_mis_weights_with_cp).",
+                help="Path to the custom TIS/RS function (e.g., miles.backends.training_utils.loss.icepop_function).",
             )
             parser.add_argument(
                 "--custom-pg-loss-reducer-function-path",
                 type=str,
                 default=None,
-                help="Path to a custom reducer function for pg_loss only. When set, pg_loss will use this custom reducer while other metrics (pg_clipfrac, ppo_kl, entropy_loss, etc.) still use the default sum_of_sample_mean. (e.g., examples/Dr.GRPO/custom_reducer.py:get_pg_loss_reducer).",
+                help="Path to a custom reducer function for pg_loss only. When set, pg_loss will use this custom reducer while other metrics (pg_clipfrac, ppo_kl, entropy_loss, etc.) still use the default sum_of_sample_mean. The path is resolved like --custom-tis-function-path (module.path:factory).",
             )
 
             parser.add_argument(

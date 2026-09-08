@@ -691,18 +691,18 @@ class RolloutManager:
         return dynamic_gbs
 
     def _make_picklable(self, obj, depth=0, max_depth=20):
-        """递归地将对象转换为可序列化的格式，处理不可pickle的对象"""
+        """Recursively convert an object into a serializable form, handling unpicklable objects."""
         if depth > max_depth:
             return "<max_depth_exceeded>"
         
         try:
-            # 尝试pickle，如果成功则返回原对象
+            # Try to pickle it; if that works, return the object as-is
             import pickle
             import io
             pickle.dumps(obj)
             return obj
         except (TypeError, AttributeError, pickle.PicklingError):
-            # 如果无法pickle，根据类型进行转换
+            # Not picklable: convert based on the type
             if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
                 return obj
             elif isinstance(obj, dict):
@@ -713,7 +713,7 @@ class RolloutManager:
             elif isinstance(obj, set):
                 return {self._make_picklable(item, depth + 1, max_depth) for item in obj}
             elif hasattr(obj, '__dict__'):
-                # 尝试转换为字典表示
+                # Try to convert it to a dict representation
                 try:
                     return {
                         '_type': type(obj).__name__,
@@ -723,7 +723,7 @@ class RolloutManager:
                 except:
                     return f"<unpicklable: {type(obj).__name__}>"
             else:
-                # 对于其他不可序列化的对象，返回其字符串表示
+                # Anything else that cannot be serialized: return its string representation
                 return f"<unpicklable: {type(obj).__name__}>"
 
     def _save_debug_rollout_data(self, data, rollout_id, evaluation: bool):
@@ -750,13 +750,13 @@ class RolloutManager:
                     samples=[to_debug_dict(sample) for sample in data],
                 )
 
-            # 清理数据，移除不可序列化的对象
+            # Clean up the data by stripping out unserializable objects
             try:
                 clean_dump_data = self._make_picklable(dump_data)
                 safe_torch_save_debug(dict(rollout_id=rollout_id, **clean_dump_data), path)
             except Exception as e:
                 logger.error(f"Failed to save debug rollout data: {e}")
-                # 尝试保存一个简化版本
+                # Fall back to saving a simplified version
                 try:
                     simplified_data = {
                         'rollout_id': rollout_id,
@@ -825,9 +825,9 @@ class RolloutManager:
         assert len(rewards) == len(samples)
 
         # --critic-exclude-overlong-penalty: ship a second per-sample reward without the soft
-        # overlong punishment (other shaping, e.g. the length reward, is kept) for the critic's
-        # regression target. The penalty is additive, so subtracting it from the shaped reward
-        # is exact. Absent the flag this branch adds nothing and the batch is unchanged.
+        # overlong punishment for the critic's regression target. The penalty is additive, so
+        # subtracting it from the shaped reward is exact. Absent the flag this branch adds
+        # nothing and the batch is unchanged.
         critic_rewards = None
         if getattr(self.args, "critic_exclude_overlong_penalty", False):
             if (

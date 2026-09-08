@@ -358,11 +358,12 @@ class MegatronTrainRayActor(TrainRayActor):
         if rollout_id >= self.args.num_critic_only_steps:
             sync_actor_critic_data(self.args, rollout_data, self._actor_critic_groups)
 
-        # --critic-exclude-overlong-penalty: 只在 critic 进程里把 GAE 的 reward 换成剔除
-        # overlong penalty 后的版本 (rollout 侧已算好 critic_rewards), 使 value-loss 的回归
-        # 目标 (returns) 不再学习长度 shaping; values/γ/λ (含 gae_lambda_k 路径) 与主路径
-        # 完全一致。actor 进程单独调用 compute_advantages_and_returns 且看不到这次替换,
-        # advantage 不受影响。
+        # --critic-exclude-overlong-penalty: only inside the critic process, swap the GAE reward
+        # for the version with the overlong penalty removed (rollout side already computed
+        # critic_rewards), so the value-loss regression target (returns) no longer learns length
+        # shaping; values/γ/λ (including the gae_lambda_k path) stay identical to the main path.
+        # The actor process calls compute_advantages_and_returns separately and never sees this
+        # substitution, so advantages are unaffected.
         if getattr(self.args, "critic_exclude_overlong_penalty", False):
             assert "critic_rewards" in rollout_data, (
                 "--critic-exclude-overlong-penalty is set but rollout data has no 'critic_rewards'"
@@ -503,9 +504,9 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.debug_rollout_only:
             return
 
-        # critic-only warmup 期 actor 未参与训练、权重仍被 memory saver 挂起：
-        # 直接 save 会在 dist ckpt 的 all_gather_object 处触发 CUDA invalid argument，
-        # 必须先唤醒（save 完再睡回去）。
+        # During critic-only warmup the actor is not training and its weights are still suspended
+        # by the memory saver: saving directly hits a CUDA invalid argument at the dist ckpt
+        # all_gather_object, so it must be woken up first (and put back to sleep after the save).
         woke_for_save = False
         if self.args.offload_train and getattr(self, "_asleep", False):
             self.wake_up()

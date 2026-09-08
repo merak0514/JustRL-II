@@ -8,10 +8,11 @@ CALL_RESULT_PREFIX = "__CODER1_CALL_RESULT__="
 
 def build_solution_call_wrapper(user_code: str, fn_name: str) -> str:
     """
-    生成一段可交给 code_exec 执行的 Python 代码：
-    - 读取 stdin（按行）
-    - 调用 Solution().{fn_name}(*args)
-    - 把返回值序列化成"尽量接近 stdio 的文本输出"，并加固定前缀，便于外层提取
+    Build a Python program that code_exec can run:
+    - reads stdin (line by line)
+    - calls Solution().{fn_name}(*args)
+    - serializes the return value into text that stays as close to stdio output as
+      possible, prefixed with a fixed marker so the caller can extract it
     """
     tpl = r"""
 # === User Code START ===
@@ -92,8 +93,8 @@ def solution_mode_is_succ(
     max_char_display: int,
 ) -> Tuple[bool, str]:
     """
-    Solution(call-based) 模式下的失败判定。
-    返回 (fail(bool), extracted_text_stripped(str))。
+    Failure check for Solution (call-based) mode.
+    Returns (fail(bool), extracted_text_stripped(str)).
     """
     if not succ:
         err_output = "" if output is None else str(output).strip()[:max_char_display]

@@ -25,7 +25,7 @@ justrl2/                   the recipe — everything JustRL2-specific
   eval.py                  offline AIME eval of an HF export
   model_args/, setup/      MiniCPM5-2B Megatron args; env / ray / setup helpers
 miles/, train.py           the framework (Miles fork; see third_party/README.md)
-third_party/               Megatron-LM / SGLang: community image, patches for stock Megatron
+third_party/               Megatron-LM / SGLang: how to get them (image or git clone)
 Dockerfile                 FROM radixark/miles:dev (Megatron-LM + SGLang + TE preinstalled)
 tools/                     HF <-> torch_dist converters
 examples/value_head_demo.py   CPU toy: bias 0 vs 0.52 value-head init

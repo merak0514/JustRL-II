@@ -61,9 +61,9 @@ async def train(args):
             await actor_model.clear_memory()
 
     async def save(rollout_id):
-        # 即使在 critic-only warmup 期间也保存 actor（权重虽未更新，但 resume 的
-        # start_rollout_id 由 actor ckpt 推断；不存 actor 会导致重启后回到 rollout 0，
-        # 而 critic 却带着旧状态续训，产生错位）。
+        # Save the actor even during critic-only warmup. Its weights are unchanged, but
+        # resume infers start_rollout_id from the actor ckpt; without one, a restart would
+        # rewind to rollout 0 while the critic resumes from its old state, desyncing the two.
         await actor_model.save_model(
             rollout_id,
             force_sync=rollout_id == args.num_rollout - 1,

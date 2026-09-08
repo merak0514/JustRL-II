@@ -27,20 +27,21 @@ docker run --gpus all --ipc=host --network=host -it justrl2
 
 Image tags and how they are built: <https://github.com/radixark/miles/tree/main/docker>.
 
-## Building on stock NVIDIA Megatron-LM instead
+## Bare metal: clone the two frameworks
 
-If you cannot use the image, the Miles-specific Megatron changes are collected in
-`third_party/patches/megatron.patch` (dist-checkpointing, TE extensions, GPT layer specs,
-the distributed optimizer, `--override-opt_param-scheduler`, …). Clone NVIDIA Megatron-LM at
-the version the patch was cut against (the Miles `nightly-dev-20260113` line), then:
+If you are not using the image, clone the current version of each next to the repo root.
+There is nothing to pin — the recipe uses only stable interfaces of both projects, so the
+latest of each is the right choice:
 
 ```bash
-APPLY_MEGATRON_PATCH=1 bash justrl2/setup/setup.sh     # idempotent, marker file
+git clone https://github.com/radixark/Megatron-LM.git -b miles-main Megatron-LM
+git clone https://github.com/sgl-project/sglang.git   -b sglang-miles sglang
 ```
 
-`third_party/patches/sglang.patch` is the corresponding Miles diff on top of the SGLang
-release the image is based on; it is provided for reference — use the `sglang-miles`
-branch rather than re-applying it.
+`radixark/Megatron-LM` is Miles' maintained fork of NVIDIA Megatron-LM; it already carries
+the dist-checkpointing, TE and distributed-optimizer changes the recipe needs, so no patch
+step is required. `third_party/patches/` keeps the equivalent diffs against stock NVIDIA
+Megatron-LM and stock SGLang for reference only — you do not need them for a normal setup.
 
 ## The base model is plain Llama
 

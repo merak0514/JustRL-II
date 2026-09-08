@@ -72,19 +72,6 @@ def hf_download_dataset(full_name: str, data_dir: str = "/root/datasets"):
     exec_command(f"hf download --repo-type dataset {full_name} --local-dir {data_dir}/{partial_name}")
 
 
-def fp8_cast_bf16(path_src, path_dst):
-    sentinel = Path(path_dst) / "model.safetensors.index.json"
-    if sentinel.exists():
-        print(f"fp8_cast_bf16 skip {path_dst} since {sentinel} exists")
-        return
-
-    exec_command(
-        f"python {repo_base_dir}/tools/fp8_cast_bf16.py "
-        f"--input-fp8-hf-path {path_src} "
-        f"--output-bf16-hf-path {path_dst} "
-    )
-
-
 # This class can be extended by concrete scripts
 @dataclass
 class ExecuteTrainConfig:

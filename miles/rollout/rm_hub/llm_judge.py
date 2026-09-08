@@ -1,12 +1,16 @@
 """LLM-as-Judge reward model (Arena Hard / GenRM style).
 
-从 verl 框架移植 GenRM Arena Hard 评估逻辑到 miles 框架，主要特性：
-- 使用 Arena Hard 风格的 system+user prompt 模版（---SYSTEM--- / ---USER--- 分隔）
-- 双查询位置去偏（A/B 交换），加权打分（强判定 3 倍权重）
-- 对模型回复和 judge 回复均做 extract_non_reasoning_content 处理，剥离 <think> 块
-- judge 调用带超时 + 最多 3 次重试（指数退避）；对 400/408/429/500/502/503/504 等可重试 HTTP 状态退避重试
-- 重试仍失败后：``llm_judge_reward`` / ``self_judge_reward`` 丢弃该样本（``remove_sample=True``），不中断整次 rollout
-- 通过 --judge-kwargs 'key=value,...' 统一传递 judge API 参数（temperature, max_tokens 等）
+Ports the GenRM Arena Hard evaluation logic from verl to miles. Key points:
+- Arena Hard style system+user prompt template (---SYSTEM--- / ---USER--- separators)
+- Position debiasing via two queries with A/B swapped, weighted scoring (strong verdicts count 3x)
+- Both the model response and the judge response go through extract_non_reasoning_content
+  to strip <think> blocks
+- Judge calls have a timeout and up to 3 retries with exponential backoff; retryable HTTP
+  statuses (400/408/429/500/502/503/504, ...) back off and retry
+- If the retries still fail, ``llm_judge_reward`` / ``self_judge_reward`` drops the sample
+  (``remove_sample=True``) instead of aborting the whole rollout
+- Judge API parameters (temperature, max_tokens, ...) are passed through with
+  --judge-kwargs 'key=value,...'
 
 Sends the model's response and a reference response to a judge LLM via an
 OpenAI-compatible /v1/chat/completions endpoint.  Supports two modes:

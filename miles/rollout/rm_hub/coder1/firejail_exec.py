@@ -67,7 +67,7 @@ def _log_stdin_and_repro(command, *, stdin: str = None, cwd: str = None) -> None
     stdin_q = shlex.quote(head if truncated else s)
     repro = f"[firejail.repro] printf %s {stdin_q} | {cmd_str}"
     if truncated:
-        repro += "  # NOTE: stdin 在日志里已截断"
+        repro += "  # NOTE: stdin was truncated in this log"
     coder1_debug_log(repro)
     try:
         coder1_debug_log(repro, path=os.path.join(os.getcwd(), "coder1.log"))
@@ -87,9 +87,9 @@ def _killpg_safe(proc):
 
 def _run_subprocess(command, *, input_data=None, env=None, cwd=None, timeout=None):
     """
-    Popen + communicate 封装，支持 BatchContext 跟踪。
-    使用 start_new_session=True 创建独立进程组，
-    cancel_all() 通过 killpg 杀整个进程组。
+    Popen + communicate wrapper with BatchContext tracking.
+    start_new_session=True puts the child in its own process group so
+    cancel_all() can kill the whole group with killpg.
     """
     batch_ctx = get_current_batch_ctx()
     if batch_ctx and batch_ctx.cancelled:

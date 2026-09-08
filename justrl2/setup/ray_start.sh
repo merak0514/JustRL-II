@@ -83,10 +83,10 @@ if [ $RANK -eq 0 ]; then
     --include-dashboard=true \
     --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
     if [ $? -ne 0 ]; then
-        echo "错误: Head节点启动失败!"
+        echo "ERROR: failed to start the head node!"
         exit 1
     fi
-    echo "Head节点已就绪"
+    echo "Head node is ready"
 else
     sleep 10
     ray start --address="$RAY_ADDRESS" \
@@ -96,41 +96,41 @@ else
     --object-store-memory=${RAY_OBJECT_STORE_MEMORY} \
     --disable-usage-stats \
     --block
-    echo "Worker节点已连接"
+    echo "Worker node connected"
 fi
 if [ $RANK -eq 0 ]; then
-    echo "等待所有 ${WORLD_SIZE} 个节点加入 Ray 集群..."
+    echo "Waiting for all ${WORLD_SIZE} nodes to join the Ray cluster..."
     MAX_WAIT=600
     WAITED=0
     INTERVAL=15
     while [ $WAITED -lt $MAX_WAIT ]; do
         NODE_COUNT=$(ray status 2>/dev/null | grep -c "node_" || true)
-        echo "活跃节点: ${NODE_COUNT}/${WORLD_SIZE} (已等待 ${WAITED}s)"
+        echo "Active nodes: ${NODE_COUNT}/${WORLD_SIZE} (waited ${WAITED}s)"
         if [ "$NODE_COUNT" -ge "$WORLD_SIZE" ]; then
-            echo "所有 ${WORLD_SIZE} 个节点已就绪!"
+            echo "All ${WORLD_SIZE} nodes are ready!"
             break
         fi
         sleep $INTERVAL
         WAITED=$((WAITED + INTERVAL))
     done
     if [ "$NODE_COUNT" -lt "$WORLD_SIZE" ]; then
-        echo "警告: 等待超时! 只有 ${NODE_COUNT}/${WORLD_SIZE} 个节点活跃"
+        echo "WARNING: timed out! Only ${NODE_COUNT}/${WORLD_SIZE} nodes are active"
         ray status
     fi
 
-    echo "等待 Ray dashboard 启动..."
+    echo "Waiting for the Ray dashboard to start..."
     MAX_RETRIES=30
     RETRY_COUNT=0
     while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
         if curl -s -f http://127.0.0.1:8265/api/version > /dev/null 2>&1; then
-            echo "Ray dashboard 已就绪"
+            echo "Ray dashboard is ready"
             break
         fi
         RETRY_COUNT=$((RETRY_COUNT + 1))
         sleep 2
     done
     if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-        echo "警告: Ray dashboard 可能未完全启动，但继续执行..."
+        echo "WARNING: the Ray dashboard may not be fully up, continuing anyway..."
     fi
 
     ray status

@@ -82,12 +82,13 @@ def _normalize_line_whitespace(s: str) -> str:
 
 def semantic_compare_output(output_str: str, expected_str: str) -> bool:
     """
-    语义比较两个输出字符串是否相等（参考 opencompass 实现）
+    Compare two output strings semantically (follows the opencompass implementation).
 
-    核心思路：
-        程序的 stdout 输出本质上就是字符串。先解析 expected 确定期望类型：
-        - 如果期望类型是 str → output 直接作为字符串比较（不 eval）
-        - 如果期望类型是 int/float/list 等 → output 需要 eval 后比较
+    Idea:
+        A program's stdout is just a string. Parse expected first to learn the
+        expected type:
+        - expected is a str → compare output as a plain string (no eval)
+        - expected is an int/float/list/... → eval output before comparing
     """
     import json
     import numpy as np

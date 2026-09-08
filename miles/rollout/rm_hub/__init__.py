@@ -56,8 +56,8 @@ async def async_rm(args, sample: Sample, **kwargs):
     elif rm_type == "dapo":
         return compute_score_dapo(response, label)
     elif rm_type == "math" or rm_type.startswith("union("):
-        # 部分数据集的 metadata.rm_type 记录的是离线判分口径字符串
-        # (如 "union(deepscaler_rule_based, math_verify)")，语义即双 verifier 并集
+        # Some datasets record an offline grading expression in metadata.rm_type
+        # (e.g. "union(deepscaler_rule_based, math_verify)"), meaning the union of both verifiers.
         return 1 if grade_answer_union(response, label) else 0
     elif rm_type == "f1":
         return f1_score(response, label)[0]
@@ -75,12 +75,6 @@ async def async_rm(args, sample: Sample, **kwargs):
         return compute_rlvr_ifeval_reward(response, label, metadata=metadata)
     elif rm_type == "random":
         return random.randint(0, 1)
-    elif rm_type == "triton":
-        from .triton_verify import compute_score as compute_triton_score
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            _code_rm_executor, partial(compute_triton_score, response, label)
-        )
     elif rm_type == "code":
         from .coder1 import get_coder1_reward
         loop = asyncio.get_running_loop()

@@ -3,7 +3,7 @@
 Captures per-token ``(train_log_prob, rollout_log_prob)`` on active response
 tokens at a few chosen rollout steps, so a scatter of ``pi_train`` vs
 ``pi_infer`` (colored by whether IcePop keeps or masks the token) can be drawn
-offline. See ``tools/plot_icepop_scatter.py``.
+offline from the dumped tensors.
 
 Design notes:
 - Gated by ``args.icepop_dump_dir`` (falls back to ``args.dump_details``); a

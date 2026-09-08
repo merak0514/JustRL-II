@@ -2,7 +2,7 @@
 
 Each trajectory class defines a complete multi-turn conversation with tool calls.
 Used by:
-- tests/fast/rollout/generate_hub/test_pretokenized_chat.py (chat template verification)
+- tests/fast/utils/chat_template_utils/test_pretokenized_chat.py (chat template verification)
 - tests/fast/router/test_session_pretokenized_e2e.py (session proxy e2e)
 
 Class attributes consumed by chat_template_verify:

@@ -1,7 +1,7 @@
 """
-代码提取与格式验证模块
+Code extraction and format validation.
 
-从模型输出中提取代码块和答案，支持 TIR 模式的代码提取。
+Extracts code blocks and answers from model output, including TIR-mode extraction.
 """
 import re
 from typing import List
@@ -34,8 +34,8 @@ def extract_code_from_string(solution_str: str) -> str:
 
 def tir_code_extract(solution_str: str) -> str:
     """
-    TIR 模式下的代码提取：从 LLM 输出中提取最后一个 python 代码块。
-    取最后一个匹配的代码块（LLM 最终答案通常在最后）。
+    TIR-mode code extraction: pull the last python code block out of the LLM output.
+    The last match wins, since the LLM's final answer usually comes last.
     """
     patterns = [
         r"```(?:python|py|python3)\s*\n([\s\S]*?)```",
@@ -52,7 +52,7 @@ def tir_code_extract(solution_str: str) -> str:
 
     if not code_blocks:
         print(
-            "未找到任何 ``` ``` 代码块。请确认 LLM 输出使用 ```python ... ``` 来标注代码。",
+            "No ``` ``` code block found. Check that the LLM output marks code with ```python ... ```.",
             solution_str[len(solution_str) - 300:],
         )
         return ""

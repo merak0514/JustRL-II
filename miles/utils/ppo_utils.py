@@ -582,9 +582,10 @@ def get_advantages_and_returns_batch(
         response_lengths:  list[int], each sample's response_len
         values_list:       list[Tensor], each shape = [resp_len_i]
         rewards_list:      list[Tensor], same shape
-        length_adaptive_lambda_k: 若设置 (JustRL2 length-adaptive 解耦 GAE), advantage 用
-            逐样本 λ_i = k^(1/L_i) (首 token 恒拿到终端 credit 的 k 倍, 与长度无关),
-            而 returns 用 λ=1 的无偏目标 (γ=1 时即奖励后缀和), 二者解耦。
+        length_adaptive_lambda_k: if set (JustRL2 length-adaptive decoupled GAE), advantages use
+            a per-sample λ_i = k^(1/L_i) (the first token always receives k times the terminal
+            credit, independent of length), while returns use the unbiased λ=1 target (the
+            reward suffix sum when γ=1); the two are decoupled.
     Output:
         advantages_list:   list[Tensor], each shape = [resp_len_i]
         returns_list:      list[Tensor], same shape
@@ -608,10 +609,11 @@ def get_advantages_and_returns_batch(
         if cp_size > 1:
             from miles.backends.training_utils.cp_utils import local_response_to_full
 
-            # 集合通信不变量：CP 组内所有 rank 必须执行完全相同的通信序列。
-            # 这里先把各样本的本地分片放回全长坐标（纯本地），再对整个 batch 只做
-            # 两次固定的 allreduce（values/rewards 各一次），而不是逐样本 2B 次——
-            # 消除任何数据依赖的通信次数偏差。
+            # Collective-communication invariant: every rank in the CP group must execute exactly
+            # the same communication sequence. Here we first scatter each sample's local shard
+            # back into full-length coordinates (purely local), then do just two fixed allreduces
+            # for the whole batch (one for values, one for rewards) instead of 2B per-sample ones
+            # — eliminating any data-dependent variation in the number of collectives.
             for i, (total_len, resp_len, v, r) in enumerate(
                 zip(total_lengths, response_lengths, values_list, rewards_list, strict=False)
             ):

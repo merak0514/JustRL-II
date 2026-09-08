@@ -5,8 +5,7 @@ generation prompt) produces a string that is an exact prefix of rendering
 all messages (with generation prompt).  This is required by sglang's
 pretokenized prefix mechanism for agentic workflows.
 
-Core functions are used by both the CLI script
-(``scripts/tools/verify_chat_template.py``) and the test suite
+Core functions are used by the test suite
 (``tests/fast/utils/chat_template_utils/test_pretokenized_chat.py``).
 """
 

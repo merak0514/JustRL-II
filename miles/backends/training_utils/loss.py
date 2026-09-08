@@ -786,8 +786,9 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
         cp_rank = parallel_state.cp.rank
         for reward, k in zip(old_rewards, kl, strict=False):
             k *= kl_coef
-            # 空响应样本 (response_length=0, 如立即 EOS) 的 k 为空张量, 跳过终点
-            # 奖励注入即可: 其 advantage/returns 均为空, 对梯度零贡献, 不会 crash。
+            # For empty-response samples (response_length=0, e.g. an immediate EOS) k is an empty
+            # tensor, so just skip the terminal reward injection: their advantages/returns are
+            # both empty, contribute zero gradient, and nothing crashes.
             if cp_rank == 0 and k.numel() > 0:
                 k[-1] += reward
             rewards.append(k)
@@ -889,9 +890,10 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
 
             all_masks = torch.cat(mask_chunks)
 
-        # 集合通信不变量：distributed_masked_whiten 含 DP-group allreduce，所有 rank
-        # 必须无条件参与。CP 切片下本地分片可能为空，空 tensor 参与是安全的
-        # （贡献 [0,0,0] 统计量）；若按本地是否为空跳过，会死锁整个 DP group。
+        # Collective-communication invariant: distributed_masked_whiten contains a DP-group
+        # allreduce, so every rank must participate unconditionally. Under CP slicing the local
+        # shard may be empty; passing an empty tensor is safe (it contributes [0,0,0] to the
+        # statistics), whereas skipping when the local shard is empty deadlocks the whole DP group.
         assert (
             all_advs.size() == all_masks.size()
         ), f"Shape mismatch before whitening: advantages {all_advs.size()}, masks {all_masks.size()}"
