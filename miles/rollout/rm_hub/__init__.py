@@ -1,8 +1,5 @@
 import asyncio
-import os
 import random
-from concurrent.futures import ProcessPoolExecutor
-from functools import partial
 
 import aiohttp
 
@@ -16,9 +13,6 @@ from .math_dapo_utils import compute_score as compute_score_dapo
 from .rouge_l import compute_rouge_l_reward
 from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_union, grade_answer_verl
-
-_PRIME_NUM_PROCESSES = int(os.environ.get("PRIME_NUM_PROCESSES", "64"))
-_code_rm_executor = ProcessPoolExecutor(max_workers=_PRIME_NUM_PROCESSES)
 
 
 async def remote_rm(args, sample: Sample):
@@ -75,12 +69,6 @@ async def async_rm(args, sample: Sample, **kwargs):
         return compute_rlvr_ifeval_reward(response, label, metadata=metadata)
     elif rm_type == "random":
         return random.randint(0, 1)
-    elif rm_type == "code":
-        from .coder1 import get_coder1_reward
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            _code_rm_executor, partial(get_coder1_reward, response, label, extra_info=metadata)
-        )
     elif rm_type == "llm_judge":
         from .llm_judge import llm_judge_reward
         return await llm_judge_reward(args, sample)
