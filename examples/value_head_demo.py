@@ -37,7 +37,7 @@ HIDDEN = 128          # toy hidden size (real MiniCPM-2B: 2048)
 LR = 1e-3
 STEPS = 800
 SEQ_LEN = 32
-REWARD_MEAN = 0.52    # value target band (= the seeded prior; the s9 mean reward)
+REWARD_MEAN = 0.52    # value target band (= the seeded prior; the training mix's mean reward)
 REWARD_STD = 0.2
 
 

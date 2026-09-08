@@ -11,7 +11,7 @@
 - **博客**：[JustRL-II：用 critic 把小模型推到 128k 推理](https://panhaoxuan.notion.site/justrl-ii-small-llms-to-128k-reasoning-with-a-critic-cn)（[English](https://panhaoxuan.notion.site/justrl-ii-scaling-small-llms-to-128k-reasoning-with-a-critic)）—— 完整的方法、实验与消融，本仓库是它的实现。
 - **方法**：[`docs/method.md`](docs/method.md) —— 每个组件做什么、代码在哪。
 - **复现**：[`docs/reproduce.md`](docs/reproduce.md) —— 拓扑、启动、续训、评测。
-- **数据**：[`docs/data.md`](docs/data.md) —— s9 训练集与 AIME 评测集。
+- **数据**：[`docs/data.md`](docs/data.md) —— UltraData-RL-Math-2609 训练集与 AIME 评测集。
 
 ## 目录结构
 

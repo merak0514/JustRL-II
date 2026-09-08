@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Download the JustRL2 datasets from the Hugging Face Hub and write the jsonl files
+"""Download the JustRL2 training data from the Hugging Face Hub and write the jsonl
 that `justrl2/train.sh` reads.
 
     python justrl2/prepare_data.py [--data-dir datasets]
 
-Produces:
-    <data-dir>/justrl2-math-s9.jsonl      training set   (openbmb/JustRL2-math-s9)
-    <data-dir>/aime-2024.jsonl            eval           (openbmb/JustRL2-aime-eval, split aime2024)
-    <data-dir>/aime-2025.jsonl                                                       aime2025
-    <data-dir>/aime-2026.jsonl                                                       aime2026
+Training set: the **Math** slice of `openbmb/UltraData-RL-2609` (32,412 verifiable
+math problems) — the corpus the JustRL2 runs were trained on. It is written to
+`<data-dir>/UltraData-RL-Math-2609.jsonl`.
 
-Each line is {"prompt": <str or chat messages>, "label": <answer str>, ...extra columns}.
-miles reads `prompt` (wrapped as a single user turn and passed through the chat template)
-and `label` (the ground-truth answer, graded by the `math` reward with math-verify as
-fallback). Any other columns are kept as metadata.
+The Hub schema is `{uuid, query, ground_truth, source, domain}`; miles expects
+`prompt` (the question, wrapped as a single user turn through the chat template) and
+`label` (the reference answer, graded by the `math` reward with math-verify as a
+fallback). The mapping is done here, and the original columns are preserved.
+
+Evaluation sets (AIME 2024 / 2025 / 2026) are public benchmarks that are not part of
+this dataset — see `--eval-repo` below and docs/data.md.
 """
 
 from __future__ import annotations
@@ -22,26 +23,29 @@ import argparse
 import json
 from pathlib import Path
 
-TRAIN_REPO = "openbmb/JustRL2-math-s9"
-EVAL_REPO = "openbmb/JustRL2-aime-eval"
-EVAL_SPLITS = {"aime2024": "aime-2024.jsonl", "aime2025": "aime-2025.jsonl", "aime2026": "aime-2026.jsonl"}
+TRAIN_REPO = "openbmb/UltraData-RL-2609"
+TRAIN_CONFIG = "Math"
+TRAIN_OUT = "UltraData-RL-Math-2609.jsonl"
 
 
 def _dump(ds, path: Path, prompt_key: str, label_key: str) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    n = 0
+    n = skipped = 0
     with path.open("w") as f:
         for row in ds:
             row = dict(row)
-            if prompt_key != "prompt":
-                row["prompt"] = row.pop(prompt_key)
-            if label_key != "label":
-                row["label"] = row.pop(label_key)
-            if row["label"] is None or str(row["label"]).strip() == "":
+            prompt = row.get(prompt_key)
+            label = row.get(label_key)
+            if not prompt or label is None or str(label).strip() == "":
+                skipped += 1
                 continue
-            row["label"] = str(row["label"])
+            # keep the original columns (uuid/source/domain) as metadata
+            row["prompt"] = prompt
+            row["label"] = str(label)
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
             n += 1
+    if skipped:
+        print(f"  ({skipped} rows skipped: empty query or ground_truth)")
     return n
 
 
@@ -49,30 +53,49 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="datasets")
     ap.add_argument("--train-repo", default=TRAIN_REPO)
-    ap.add_argument("--eval-repo", default=EVAL_REPO)
-    ap.add_argument("--prompt-key", default="prompt", help="column holding the question")
-    ap.add_argument("--label-key", default="label", help="column holding the answer")
+    ap.add_argument("--train-config", default=TRAIN_CONFIG, help="dataset config (Math/Code/Knowledge/Long-Context)")
+    ap.add_argument("--prompt-key", default="query", help="Hub column holding the question")
+    ap.add_argument("--label-key", default="ground_truth", help="Hub column holding the answer")
+    ap.add_argument("--out-name", default=TRAIN_OUT)
+    ap.add_argument(
+        "--eval-repo",
+        default=None,
+        help="optional HF dataset with AIME-style eval problems; needs --eval-splits. "
+        "Not set by default: supply your own aime-20XX.jsonl (see docs/data.md).",
+    )
+    ap.add_argument(
+        "--eval-splits",
+        default="aime2024,aime2025,aime2026",
+        help="comma-separated splits (or configs) to pull from --eval-repo",
+    )
     ap.add_argument("--skip-train", action="store_true")
-    ap.add_argument("--skip-eval", action="store_true")
     args = ap.parse_args()
 
     from datasets import load_dataset
 
     out = Path(args.data_dir)
     if not args.skip_train:
-        ds = load_dataset(args.train_repo, split="train")
-        n = _dump(ds, out / "justrl2-math-s9.jsonl", args.prompt_key, args.label_key)
-        print(f"train: {n} rows -> {out / 'justrl2-math-s9.jsonl'}")
-    if not args.skip_eval:
-        for split, fname in EVAL_SPLITS.items():
-            ds = load_dataset(args.eval_repo, split=split)
+        ds = load_dataset(args.train_repo, args.train_config, split="train")
+        n = _dump(ds, out / args.out_name, args.prompt_key, args.label_key)
+        print(f"train: {n} rows -> {out / args.out_name}")
+
+    if args.eval_repo:
+        for split in [s.strip() for s in args.eval_splits.split(",") if s.strip()]:
+            try:
+                ds = load_dataset(args.eval_repo, split=split)
+            except Exception:
+                ds = load_dataset(args.eval_repo, split, split="train")
+            fname = f"{split.replace('aime', 'aime-')}.jsonl"
             n = _dump(ds, out / fname, args.prompt_key, args.label_key)
             print(f"{split}: {n} rows -> {out / fname}")
+    else:
+        print(
+            "\neval: not downloaded (no --eval-repo). train.sh expects AIME jsonl files\n"
+            f"      at {out}/aime-2024.jsonl, aime-2025.jsonl, aime-2026.jsonl with the\n"
+            "      same prompt/label fields — see docs/data.md."
+        )
 
-    print(
-        "\nNow export for train.sh (or leave the defaults, which point here):\n"
-        f"  export DATA_DIR={out.resolve()}"
-    )
+    print(f"\nexport DATA_DIR={out.resolve()}    # train.sh defaults derive from this")
 
 
 if __name__ == "__main__":
