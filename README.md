@@ -30,7 +30,7 @@ third_party/               Megatron-LM / SGLang: how to get them (image or git c
 Dockerfile                 FROM radixark/miles:dev (Megatron-LM + SGLang + TE preinstalled)
 tools/                     HF <-> torch_dist converters
 examples/value_head_demo.py   CPU toy: bias 0 vs 0.52 value-head init
-tests/                     GAE λ, value-head init, chunked GAE
+tests/                     GAE λ, value-head init, chunked GAE (torch only, no GPU)
 ```
 
 ## Quick start
@@ -71,8 +71,12 @@ Megatron-LM and SGLang are needed to *train*. To study or unit-test the recipe i
 
 ```bash
 python examples/value_head_demo.py          # torch only
-python -m pytest tests/test_gae_lambda_k.py tests/test_critic_value_bias_init.py tests/test_chunked_gae.py
+python -m pytest tests/                     # 44 tests, torch only, ~30s
 ```
+
+`tests/` covers the three claims above: the length-adaptive λ (including its collapse
+guard), chunked GAE against a serial reference at 128k, and the value-head bias seeding
+and zero-init. No GPU, no network, no Megatron.
 
 ## Citation
 

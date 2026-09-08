@@ -29,7 +29,7 @@ third_party/               Megatron-LM / SGLang：如何获取（社区镜像或
 Dockerfile                 FROM radixark/miles:dev（预装 Megatron-LM + SGLang + TE）
 tools/                     HF <-> torch_dist 转换脚本
 examples/value_head_demo.py   CPU 玩具实验：value head bias 初始化 0 vs 0.52
-tests/                     GAE λ、value head 初始化、chunked GAE
+tests/                     GAE λ、value head 初始化、chunked GAE（只依赖 torch，无需 GPU）
 ```
 
 ## 快速开始
@@ -69,8 +69,11 @@ python justrl2/eval.py --model runs/justrl2_minicpm5_2b_math128k/hf/iter_0000299
 
 ```bash
 python examples/value_head_demo.py          # 只依赖 torch
-python -m pytest tests/test_gae_lambda_k.py tests/test_critic_value_bias_init.py tests/test_chunked_gae.py
+python -m pytest tests/                     # 44 个测试，只依赖 torch，约 30 秒
 ```
+
+`tests/` 覆盖上面三条主张：长度自适应 λ（含其塌缩保护）、chunked GAE 与串行参考实现在 128k
+下的一致性、以及 value head 的 bias 播种与零初始化。不需要 GPU、不需要网络、不需要 Megatron。
 
 ## 引用
 
