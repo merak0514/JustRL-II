@@ -1,15 +1,18 @@
-"""critic value head 初始化的回归测试 (需要 megatron 环境, 在 devspace/CI 上跑)。
+"""Regression tests for the critic value-head initialization (needs a megatron env).
 
-守两条:
-1. 标量 value head (output_size=1) 必须零初始化。normal(0, 0.02) 在 hidden=2048 上
-   给出 V ~ ±9.7, 而组内中心化后的目标只有 ±0.35 —— critic_lr 5e-6 需 ~90 步才能
-   填平, 任何 warmup 预算都不够, actor 会在 90% 是噪声的 advantage 上训练
-   (job 697926 实测: value_loss 94, value_residual_frac 732, adv mu_w -7.4)。
-   零初始化让 adv = R̃ 精确等于 GRPO, 这是 turn_ppo 依赖的 failure-safe 退化性质。
-2. 非标量输出层 (词表头) 不受影响, 仍是 normal 初始化。
+Two invariants:
+1. The scalar value head (output_size=1) must be zero-initialized by default.
+   normal(0, 0.02) on hidden=2048 yields V ~ ±9.7 while the regression targets live
+   in a ~±0.35 band; at critic_lr 5e-6 that offset needs ~90 steps to close, which is
+   more than any warmup budget, so the actor would train on advantages that are
+   mostly noise. With a zero weight the advantage degrades exactly to the critic-free
+   form, which is the failure-safe property the recipe relies on. (train.sh seeds the
+   *bias* at the expected mean reward on top of this; see --critic-value-bias-init.)
+2. Non-scalar output layers (the vocabulary head) are unaffected and keep normal init.
 
-这两条都只有**实例化**才能验证: 上一版把 output_size 误写成 out_features,
-py_compile / bash -n 全部通过, 却在集群建模型时 NameError 秒挂 (job 698467)。
+Both only show up on **instantiation**: an earlier version wrote out_features where
+output_size was meant, passed py_compile and bash -n, and then died with NameError as
+soon as the model was actually built.
 """
 
 from types import SimpleNamespace
@@ -36,7 +39,8 @@ def test_non_scalar_head_keeps_normal_init(cfg):
 
 
 def test_value_head_carries_output_parameter_flag(cfg):
-    """muon 把"2D 且无此标记"的参数路由进 Newton-Schulz 正交化, 其更新幅度与误差
-    无关 —— [1, H] 的 value head 会在最优点附近定幅震荡而非收敛。"""
+    """muon routes 2D parameters without this flag into Newton-Schulz orthogonalization,
+    whose update magnitude is error-independent — a [1, H] value head would then oscillate
+    at fixed amplitude around the optimum instead of converging."""
     head = LinearForLastLayer(input_size=2048, output_size=1, config=cfg)
     assert getattr(head.weight, "is_embedding_or_output_parameter", False) is True

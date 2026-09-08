@@ -87,5 +87,11 @@ If you use this code, data or the recipe, please cite the blog post:
 
 ## License
 
-Apache-2.0 (framework and recipe code). Model weights and datasets carry their own
-licenses on their Hugging Face pages.
+Apache-2.0. See [`LICENSE`](LICENSE).
+
+This repository contains a modified copy of the [Miles](https://github.com/radixark/miles)
+RL framework (itself derived from [slime](https://github.com/THUDM/slime), Copyright 2025
+Zhipu AI), redistributed under the same license. Files under `miles/`, `miles_plugins/`,
+`tools/`, `tests/` and `third_party/patches/` originate there; the JustRL2 recipe adds the
+scalar value-head critic changes, the length-adaptive GAE lambda and everything under
+`justrl2/`. Model weights and datasets carry their own licenses on their Hugging Face pages.

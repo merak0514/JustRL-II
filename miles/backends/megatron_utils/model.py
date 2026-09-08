@@ -997,7 +997,7 @@ def initialize_model_and_optimizer(
     # Eagerly create Adam moments (zeros). A never-stepped optimizer (actor during
     # critic-only warmup) otherwise saves checkpoints WITHOUT exp_avg/exp_avg_sq,
     # and resume crashes: dist-ckpt load requests them via init_state_fn but the
-    # ckpt has no metadata for those keys (605184). Zero moments == what the first
+    # ckpt has no metadata for those keys. Zero moments == what the first
     # step would create, so this is training-semantics neutral.
     _eagerly_init_optimizer_state(optimizer)
     clear_memory()

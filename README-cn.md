@@ -85,4 +85,10 @@ python -m pytest tests/test_gae_lambda_k.py tests/test_critic_value_bias_init.py
 
 ## 许可
 
-Apache-2.0（框架与配方代码）。模型权重与数据集以各自 Hugging Face 页面上的许可为准。
+Apache-2.0，见 [`LICENSE`](LICENSE)。
+
+本仓库包含 [Miles](https://github.com/radixark/miles) RL 框架的修改副本（Miles 本身派生自
+[slime](https://github.com/THUDM/slime)，Copyright 2025 Zhipu AI），以相同许可再分发。
+`miles/`、`miles_plugins/`、`tools/`、`tests/`、`third_party/patches/` 下的文件来自上游；
+JustRL2 配方新增的是标量 value head critic 相关改动、长度自适应 GAE λ，以及 `justrl2/`
+下的全部内容。模型权重与数据集以各自 Hugging Face 页面上的许可为准。

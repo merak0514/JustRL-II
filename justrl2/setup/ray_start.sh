@@ -50,9 +50,10 @@ rm -rf /tmp/ray $RAY_TMPDIR
 mkdir -p $RAY_TMPDIR
 mkdir -p $RAY_SPILL_DIR
 
-# 临时存储看护 (622523/640215 均因 ephemeral 超限在 ~56h 被杀):
-# 每 30min 打印本地盘 du top (方便下次定位增长源); 超软限额时截断超大日志文件兜底。
-# DISABLE_DISK_WATCHDOG=1 关闭; EPHEMERAL_SOFT_LIMIT_MB 默认 150GB。
+# Ephemeral-storage watchdog. Multi-day runs have been killed for exceeding the pod's
+# local-disk quota, so every 30 min print the top local-disk consumers (to locate the
+# source next time) and truncate oversized log files once past the soft limit.
+# DISABLE_DISK_WATCHDOG=1 turns it off; EPHEMERAL_SOFT_LIMIT_MB defaults to 150 GB.
 if [ "${DISABLE_DISK_WATCHDOG:-0}" != "1" ]; then
 (
     while sleep 1800; do
