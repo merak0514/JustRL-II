@@ -46,7 +46,7 @@ branch rather than re-applying it.
 
 `openbmb/JustRL-II-base-model` is a stock `LlamaForCausalLM` (42 layers, hidden 2048,
 16 heads / 2 KV heads, vocab 130560, rope θ = 5e6, 65536 positions in `config.json`;
-`justrl2/model_args/minicpm-2b.sh` mirrors this). No custom modeling code is needed on
+`justrl2/model_args/minicpm5-2b.sh` mirrors this). No custom modeling code is needed on
 either the Megatron or the SGLang side. Two EOS ids are configured
 (`eos_token_id = [1, 130073]`); SGLang picks both up from `config.json`. The 128k
 generation budget is enabled by `--sglang-context-length 131072` plus the

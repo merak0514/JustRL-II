@@ -1,6 +1,6 @@
-# MiniCPM-2B model args (Llama dense architecture)
-# Source:
-# MiniCPM-2B-0426_job_327123_step_24000_fusion_think/config.json
+# MiniCPM5-2B model args for Megatron (dense Llama architecture).
+# Mirrors config.json of openbmb/JustRL-II-base-model, the RL initialization
+# checkpoint of MiniCPM5-2B (openbmb/MiniCPM5-2B).
 MODEL_ARGS=(
    --swiglu
    --disable-bias-linear
