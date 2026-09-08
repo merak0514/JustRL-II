@@ -36,7 +36,9 @@ tests/                     GAE λ、value head 初始化、chunked GAE
 
 ```bash
 # 0. 环境：社区 Miles 镜像已预装 Megatron-LM、SGLang、TE、Ray
-docker build -t justrl2 . && docker run --gpus all --ipc=host --network=host -it justrl2
+docker build -t justrl2 . && docker run --gpus all --ipc=host --network=host -it \
+    -v $PWD/models:/workspace/JustRL2/models -v $PWD/datasets:/workspace/JustRL2/datasets \
+    -v $PWD/runs:/workspace/JustRL2/runs justrl2
 #    （不用镜像的裸机方案见 third_party/README.md）
 
 # 1. 权重与数据（Hugging Face）

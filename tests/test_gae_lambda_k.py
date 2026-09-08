@@ -108,3 +108,36 @@ def test_requires_gamma_one(cp1_parallel_state):
             lambd=1.0,
             length_adaptive_lambda_k=0.5,
         )
+
+
+def test_bf16_collapse_raises_instead_of_silently_degrading():
+    """The guard that keeps the feature from dying quietly.
+
+    bf16's spacing near 1.0 is 2**-8, so k**(1/L) rounds to exactly 1.0 for any response
+    longer than ~355 tokens — plain GAE, no length adaptation, no error. Every real
+    response here is far longer than that, so a bf16 `values` tensor would silently
+    disable the recipe's headline feature. The helper must refuse instead.
+    """
+    with pytest.raises(AssertionError, match="collapsed to 1.0"):
+        length_adaptive_lambda(0.5, [126976], device="cpu", dtype=torch.bfloat16)
+    # ~355 is where it starts; well past it must also raise
+    with pytest.raises(AssertionError, match="collapsed to 1.0"):
+        length_adaptive_lambda(0.5, [1000], device="cpu", dtype=torch.bfloat16)
+
+
+def test_short_response_survives_bf16():
+    """Below the collapse threshold bf16 still resolves lambda, so no false alarm."""
+    lam = length_adaptive_lambda(0.5, [100], device="cpu", dtype=torch.bfloat16)
+    assert float(lam[0]) < 1.0
+
+
+def test_empty_response_row_does_not_trip_the_guard():
+    """L=0 rows are lambda=0 and fully masked downstream; they must not look like a collapse."""
+    lam = length_adaptive_lambda(0.5, [0, 8192], device="cpu")
+    assert float(lam[0]) == 0.0 and float(lam[1]) < 1.0
+
+
+def test_fp32_at_128k_passes():
+    """The production path: fp32 at the full context length is fine and must not raise."""
+    lam = length_adaptive_lambda(0.5, [126976, 30000, 8192], device="cpu")
+    assert bool((lam < 1.0).all())

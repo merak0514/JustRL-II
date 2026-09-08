@@ -2,8 +2,8 @@
 """Minimal reproduction of JustRL2's cc-noLM value-head critic.
 
 A standalone, Megatron-free sanity check that the core piece — a *scalar value head*
-(`output_size=1`, zero-initialized) trained on GAE returns — actually learns on a toy
-task. It does **not** need the fork submodules, only torch.
+(`output_size=1`, zero-initialized weight over a seeded bias) — actually learns on a toy
+regression task. There is no GAE here; the targets are synthetic. It does **not** need the fork submodules, only torch.
 
 What it shows:
   1. **Prior-seeded init** — the weight is zero and the bias is the expected mean reward

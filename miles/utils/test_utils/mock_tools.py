@@ -1,3 +1,4 @@
+import functools
 import json
 from collections.abc import Callable
 from copy import deepcopy
@@ -141,7 +142,34 @@ _SYSTEM_PROMPT = (
 )
 
 
-_TOKENIZER = load_tokenizer("Qwen/Qwen3-0.6B", trust_remote_code=True)
+@functools.lru_cache(maxsize=1)
+def _tokenizer():
+    """Loaded on first use, not at import.
+
+    tests/fast/conftest.py imports this module transitively, so downloading the tokenizer
+    at import time made the whole fast suite fail at collection on any machine without
+    Hugging Face access.
+    """
+    return load_tokenizer("Qwen/Qwen3-0.6B", trust_remote_code=True)
+
+
+class _LazyTokenIds:
+    """Class attribute that tokenizes another attribute of the same class on first access.
+
+    Keeps the ``Stub.FIRST_PROMPT_TOKEN_IDS`` spelling the stubs already use while moving
+    the tokenizer call out of the class body (which runs at import).
+    """
+
+    def __init__(self, text_attr: str) -> None:
+        self._text_attr = text_attr
+        self._cache: dict[type, list[int]] = {}
+
+    def __get__(self, obj: object, owner: type) -> list[int]:
+        if owner not in self._cache:
+            text = getattr(owner, self._text_attr)
+            self._cache[owner] = _tokenizer()(text, add_special_tokens=False)["input_ids"]
+        return self._cache[owner]
+
 
 class TwoTurnStub:
     """Stub for 2-turn: get_year + get_temperature(Mars) -> final answer"""
@@ -176,8 +204,8 @@ class TwoTurnStub:
 
     PROMPT = [{"role": "user", "content": USER_QUESTION}]
 
-    FIRST_PROMPT_TOKEN_IDS = _TOKENIZER(FIRST_PROMPT, add_special_tokens=False)["input_ids"]
-    SECOND_PROMPT_TOKEN_IDS = _TOKENIZER(SECOND_PROMPT, add_special_tokens=False)["input_ids"]
+    FIRST_PROMPT_TOKEN_IDS = _LazyTokenIds("FIRST_PROMPT")
+    SECOND_PROMPT_TOKEN_IDS = _LazyTokenIds("SECOND_PROMPT")
 
     FIRST_RESPONSE_CONTENT = "Let me get the year and temperature first."
     FIRST_TOOL_CALLS_OPENAI_FORMAT = [
@@ -268,9 +296,9 @@ class ThreeTurnStub:
 
     PROMPT = [{"role": "user", "content": USER_QUESTION}]
 
-    FIRST_PROMPT_TOKEN_IDS = _TOKENIZER(FIRST_PROMPT, add_special_tokens=False)["input_ids"]
-    SECOND_PROMPT_TOKEN_IDS = _TOKENIZER(SECOND_PROMPT, add_special_tokens=False)["input_ids"]
-    THIRD_PROMPT_TOKEN_IDS = _TOKENIZER(THIRD_PROMPT, add_special_tokens=False)["input_ids"]
+    FIRST_PROMPT_TOKEN_IDS = _LazyTokenIds("FIRST_PROMPT")
+    SECOND_PROMPT_TOKEN_IDS = _LazyTokenIds("SECOND_PROMPT")
+    THIRD_PROMPT_TOKEN_IDS = _LazyTokenIds("THIRD_PROMPT")
 
     FIRST_RESPONSE_CONTENT = "Let me get the year and Mars temperature first."
     FIRST_TOOL_CALLS_OPENAI_FORMAT = [
