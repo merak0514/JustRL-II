@@ -562,7 +562,23 @@ def length_adaptive_lambda(k: float, response_lengths, device, dtype=torch.float
     assert 0.0 < k <= 1.0, f"--gae-lambda-k must be in (0, 1], got {k}"
     lengths = torch.tensor(response_lengths, device=device, dtype=torch.float32)
     lam = torch.where(lengths > 0, float(k) ** (1.0 / lengths.clamp(min=1.0)), torch.zeros_like(lengths))
-    return lam.to(dtype)
+    out = lam.to(dtype)
+    # Fail loudly instead of degrading silently. lambda = k**(1/L) approaches 1 from below
+    # (1 - 8e-6 at L=127k); bf16's spacing near 1.0 is 2**-8, so ANY response longer than
+    # ~355 tokens rounds to exactly 1.0 there — which is plain GAE with no length adaptation,
+    # i.e. this whole feature becomes a no-op while training runs on and the curves still
+    # look fine. Today `dtype` is float32 because the actor forces its logits to fp32 before
+    # computing log-probs (loss.py) and the critic's value head does the same
+    # (model_provider.py), so the values tensor this lambda is cast to is fp32. That is an
+    # accident of two unrelated call sites, not a guarantee — this assert is the guarantee.
+    if out.numel() and (out[lam > 0] >= 1.0).any():
+        raise AssertionError(
+            f"length-adaptive lambda collapsed to 1.0 under dtype={dtype}: the length-adaptive "
+            f"GAE is a no-op (k={k}, max response_len={max(response_lengths)}). "
+            f"{dtype} cannot represent k**(1/L) for L larger than ~355. Keep values/log_probs "
+            f"in float32, or pass an explicit float32 dtype to length_adaptive_lambda()."
+        )
+    return out
 
 
 def get_advantages_and_returns_batch(
@@ -629,8 +645,13 @@ def get_advantages_and_returns_batch(
 
         if length_adaptive_lambda_k:
             assert gamma == 1.0, "length-adaptive decoupled GAE requires gamma == 1.0 (returns = suffix reward sum)"
-            # λ_i is computed in fp32 (at 128k lengths λ = 1 − O(1e-5), which bf16
-            # rounds to 1.0); chunked_gae casts it to the rewards dtype itself.
+            # λ_i is computed in fp32 and then cast to the dtype of `values`. That dtype must
+            # stay fp32: at 128k lengths λ = 1 − O(1e-5), and bf16 rounds every such λ to
+            # exactly 1.0, which silently turns the length-adaptive credit assignment back
+            # into plain GAE. On the actor — the only side whose advantages are used — the
+            # chain that guarantees it is loss.py forcing the logits to fp32 before the
+            # log-probs, and sync_actor_critic_data allocating `values` as
+            # empty_like(log_prob). (The critic regresses `returns`, which carry no λ.)
             lambd_rowwise = length_adaptive_lambda(length_adaptive_lambda_k, response_lengths, device).to(dtype)
             full_advantages, _ = chunked_gae(
                 rewards=full_rewards,

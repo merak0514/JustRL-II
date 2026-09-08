@@ -36,7 +36,9 @@ tests/                     GAE λ, value-head init, chunked GAE
 
 ```bash
 # 0. environment: the community Miles image has Megatron-LM, SGLang, TE, Ray preinstalled
-docker build -t justrl2 . && docker run --gpus all --ipc=host --network=host -it justrl2
+docker build -t justrl2 . && docker run --gpus all --ipc=host --network=host -it \
+    -v $PWD/models:/workspace/JustRL2/models -v $PWD/datasets:/workspace/JustRL2/datasets \
+    -v $PWD/runs:/workspace/JustRL2/runs justrl2
 #    (bare-metal alternative: third_party/README.md)
 
 # 1. weights and data (Hugging Face)

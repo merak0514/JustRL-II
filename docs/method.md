@@ -62,8 +62,9 @@ If you port this to another trainer and skip the post-load step, the run is sile
 λ_i = k ^ (1 / L_i)          (L_i = response length, k = --gae-lambda-k)
 ```
 
-With γ = 1 the GAE weight of the terminal reward at the first token is `λ_i^L_i`, and this
-choice makes it exactly `k` for every length: the fraction of terminal credit that reaches
+With γ = 1 the GAE weight of the terminal reward at the first token is `λ_i^(L_i-1)` (the
+terminal reward enters δ at the last step), so this choice makes it `k^(1-1/L_i)` — constant
+in length up to the O(1/L) correction: the fraction of terminal credit that reaches
 the beginning of the response is a constant instead of decaying with length. Longer responses
 get a λ closer to 1, so credit propagation does not weaken on 100k-token solutions.
 
@@ -83,7 +84,7 @@ see `tests/test_gae_lambda_k.py`); 0.5 is that value rounded.
 ## 4. Critic-only warmup
 
 `--num-critic-only-steps 30`: for the first 30 rollouts only the critic is updated
-(`actor.py` gates the policy update on `rollout_id >= num_critic_only_steps`). Combined with
+(`train.py` gates the policy update on `rollout_id >= num_critic_only_steps`). Combined with
 §2 the value head is a usable baseline before the first policy step.
 
 ## 5. Length control: DAPO soft overlong penalty, kept out of the critic's target
