@@ -16,7 +16,7 @@ MODEL_ARGS=(
    --position-embedding-type rope
    --rotary-percent 1.0
    --rotary-base "${MODEL_ARGS_ROTARY_BASE:-5000000}"
-   --max-position-embeddings 65536
+   --max-position-embeddings 65536      # inert: miles sets it from --seq-length (arguments.py)
    --normalization RMSNorm
    --norm-epsilon 1e-6
    --untie-embeddings-and-output-weights

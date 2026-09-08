@@ -176,6 +176,7 @@ PERF_ARGS=(
   --recompute-num-layers 1
   --use-dynamic-batch-size
   --max-tokens-per-gpu "$MAX_TOKENS_PER_GPU"
+  # Passed for parity with the reference run; miles logs it as UNUSED and reads it nowhere.
   --log-probs-max-tokens-per-gpu $((MAX_TOKENS_PER_GPU * CONTEXT_PARALLEL_SIZE))
   --log-probs-chunk-size "$LOG_PROBS_CHUNK_SIZE"
   --attention-dropout 0.0
