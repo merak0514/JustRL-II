@@ -106,6 +106,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.args.save = self.args.critic_save
             self.args.lr = self.args.critic_lr
             self.args.lr_warmup_iters = self.args.critic_lr_warmup_iters
+            self.args.disable_param_buffers_cpu_backup = False
         else:
             for m in all_replay_managers:
                 m.enabled = getattr(self.args, f"use_{m.name}_replay")
